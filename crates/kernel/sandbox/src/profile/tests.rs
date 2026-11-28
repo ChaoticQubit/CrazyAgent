@@ -647,10 +647,10 @@ fn a_confined_sandbox_takes_no_shared_writable_folder_holding_its_confinement() 
     }
 }
 
-/// A link to the engine runtime put inside the project folder, and then the project folder
-/// itself swapped for such a link, after the sandbox was built and guarded and before it is
-/// installed, still keep the runtime's database out when the agent runs: each read fails inside
-/// the sandbox, while the same read succeeds outside it and a project file is read inside it.
+/// A link to the engine runtime put inside the project folder after the build keeps the
+/// runtime's database out when the agent runs. The project folder itself swapped for such a
+/// link after the install keeps it out of the profile already installed, and a new install
+/// refuses the swapped root; each read succeeds outside the sandbox.
 #[test]
 fn a_link_swapped_in_after_the_build_still_keeps_an_engine_secret_out() {
     let (scratch, [project, home, tmp]) = folders();
@@ -691,7 +691,19 @@ fn a_link_swapped_in_after_the_build_still_keeps_an_engine_secret_out() {
     fs::rename(&project, root.join("project.old")).unwrap();
     std::os::unix::fs::symlink(&runtime, &project).unwrap();
     assert!(fs::symlink_metadata(&project).unwrap().is_symlink());
-    refused(&project.join("engine.db"));
+    let swapped = project.join("engine.db");
+    assert_eq!(fs::read(&swapped).unwrap(), b"engine secret\n");
+    let mut command = sandbox.command(&profile, Path::new("/bin/cat"));
+    command.arg(&swapped).current_dir(&home);
+    let output = kernel_processes::spawn_gate::collected(&mut command).unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"", "{output:?}");
+    let reinstalled = sandbox.install(&profile);
+    let changed = crate::paths::GRANT_CHANGED;
+    assert!(
+        matches!(&reinstalled, Err(SandboxError::Invalid(why)) if why == changed),
+        "{reinstalled:?}"
+    );
 }
 
 /// Building a sandbox walks each secret, each harness home and the owner home once for its

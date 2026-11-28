@@ -117,6 +117,7 @@ impl InstalledSandbox {
             "{}",
             grants.display()
         );
+        sandbox.secrets_still_clear()?;
         let helper = crate::windows::existing_helper(&crate::windows::helper_beside_engine()?)?;
         let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, grants)?;
         assert!(profile.is_file());

@@ -36,9 +36,8 @@ use crate::host::LinuxHost;
 use crate::lines::*;
 use crate::net::{SandboxNetwork, SandboxRemote};
 use crate::paths::{
-    Walked, any_case, at_or_below, canonical, clean_absolute, clear_of_secrets, fold_case,
-    granted_root, granted_walked, harness_homes, owner_home, owner_secrets, plain_top,
-    regex_escape,
+    Kept, any_case, at_or_below, canonical, clean_absolute, fold_case, harness_homes, owner_home,
+    owner_secrets, plain_top, regex_escape,
 };
 use crate::ports::{
     BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
@@ -272,6 +271,10 @@ pub struct ProjectSandbox {
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
+    /// The walks this build took of the owner home, the harness homes and each secret, and of
+    /// each path it granted, from [`Self::new`] until its install, which walks every secret
+    /// again and checks each granted path against them; it is never shared with another build.
+    kept: Kept,
     carved_home: Option<(PathBuf, PathBuf)>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
@@ -344,9 +347,9 @@ impl ProjectSandbox {
         let harnesses = (hooks.access.harness_folders)();
         let secrets: Vec<PathBuf> = owner_secrets(&owner, &harnesses).collect();
         let homes = harness_homes(&owner, &harnesses);
-        let walked = Walked::of(&owner, &homes, &secrets)?;
+        let mut kept = Kept::of(&owner, &homes, &secrets)?;
         for root in [project_root, agent_home, agent_tmp] {
-            granted_walked(root, &walked)?;
+            kept.grant(root, &secrets)?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
@@ -376,6 +379,7 @@ impl ProjectSandbox {
             kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
+            kept,
             carved_home: None,
             checkout: None,
             clone: None,
@@ -468,16 +472,12 @@ impl ProjectSandbox {
                     }
                     let tmp = owner_tmp
                         .ok_or_else(|| invalid("the owner's temp folder cannot be given"))?;
-                    let owner = owner_home()?;
                     let secrets: Vec<PathBuf> =
-                        owner_secrets(&owner, &(self.hooks.access.harness_folders)()).collect();
-                    granted_root(
-                        tmp,
-                        &owner,
-                        &secrets,
-                        &(self.hooks.access.harness_folders)(),
-                    )?;
-                    clear_of_secrets(tmp, &self.engine_secrets)?;
+                        owner_secrets(&self.owner_home, &(self.hooks.access.harness_folders)())
+                            .collect();
+                    self.kept.grant(tmp, &secrets)?;
+                    let engine = self.engine_secrets.clone();
+                    self.kept.clear(tmp, &engine)?;
                     self.owner_tmp = Some(tmp.to_path_buf());
                 }
             }
@@ -628,13 +628,8 @@ impl ProjectSandbox {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
         let secrets = engine_secrets_in(self.hooks, &runtime)?;
-        for root in self
-            .writable_roots()
-            .chain(self.read_roots.iter())
-            .chain(self.tool_roots.iter())
-            .chain(self.tool_files.iter())
-        {
-            clear_of_secrets(root, &secrets)?;
+        for root in self.guarded_paths() {
+            self.kept.clear(&root, &secrets)?;
         }
         self.engine_secrets = secrets;
         Ok(self)
@@ -674,16 +669,11 @@ impl ProjectSandbox {
             .filter(|secret| carved.as_ref().is_none_or(|(_, folder)| *secret != folder))
             .cloned()
             .collect();
-        for root in self
-            .writable_roots()
-            .chain(self.read_roots.iter())
-            .chain(self.tool_roots.iter())
-            .chain(self.tool_files.iter())
-        {
-            if carved.as_ref().is_some_and(|(home, _)| home == root) {
-                clear_of_secrets(root, &around_home)?;
+        for root in self.guarded_paths() {
+            if carved.as_ref().is_some_and(|(home, _)| *home == root) {
+                self.kept.clear(&root, &around_home)?;
             } else {
-                clear_of_secrets(root, &secrets)?;
+                self.kept.clear(&root, &secrets)?;
             }
         }
         for secret in secrets {
@@ -715,6 +705,26 @@ impl ProjectSandbox {
         paths
     }
 
+    /// The paths a guard checks against the engine secrets it adds: every writable root, read
+    /// root, tool root and tool file. Output: the paths, copied, in that order.
+    fn guarded_paths(&self) -> Vec<PathBuf> {
+        self.writable_roots()
+            .chain(self.read_roots.iter())
+            .chain(self.tool_roots.iter())
+            .chain(self.tool_files.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// Checks, as the install writes the profile, that each path this build granted is the
+    /// one it checked and holds or sits in no secret it was checked against, every path and
+    /// secret walked again now, so one made, moved or swapped since is judged as it is then.
+    /// Output: unit, or `Invalid` with [`crate::paths::GRANT_CHANGED`] or
+    /// [`crate::paths::SECRET_ROOT_REFUSED`].
+    pub(crate) fn secrets_still_clear(&self) -> Result<(), SandboxError> {
+        self.kept.recheck()
+    }
+
     /// Adds one writable worktree the agent may also start in, for a checkout the
     /// engine keeps outside the project folder. Input: a canonical existing folder that
     /// neither holds nor sits inside a path from [`Self::secret_paths`].
@@ -723,12 +733,8 @@ impl ProjectSandbox {
         if self.worktrees.len() >= WORKTREES_MAX {
             return Err(invalid("too many worktrees"));
         }
-        granted_root(
-            worktree,
-            &owner_home()?,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(worktree, &secrets)?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
         self.confinement_kept()?;
@@ -784,7 +790,7 @@ impl ProjectSandbox {
         }
         let secrets = self.secret_paths();
         for root in [worktree, admin.as_path(), objects.as_path()] {
-            clear_of_secrets(root, &secrets)?;
+            self.kept.clear(root, &secrets)?;
         }
         assert!(
             [worktree, admin.as_path(), objects.as_path()]
@@ -834,7 +840,8 @@ impl ProjectSandbox {
         if !metadata.is_dir() || canonical(&git)? != git {
             return Err(invalid("the clone's git folder must be a real folder"));
         }
-        clear_of_secrets(worktree, &self.secret_paths())?;
+        let secrets = self.secret_paths();
+        self.kept.clear(worktree, &secrets)?;
         assert!(worktree.starts_with(&self.project_root) && worktree != self.project_root);
         self.read_roots.push(self.project_root.clone());
         self.clone = Some(worktree.to_path_buf());
@@ -908,7 +915,7 @@ impl ProjectSandbox {
         }
         let secrets = self.secret_paths();
         for root in [folder.as_path(), records.as_path()] {
-            clear_of_secrets(root, &secrets)?;
+            self.kept.clear(root, &secrets)?;
         }
         assert!(
             [folder.as_path(), records.as_path()]
@@ -976,3 +983,5 @@ impl Checkout {
 mod interpreter_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+#[cfg(all(test, target_os = "macos"))]
+mod walk_tests;

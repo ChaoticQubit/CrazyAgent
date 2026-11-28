@@ -8,12 +8,8 @@ impl ProjectSandbox {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        granted_root(
-            root,
-            &owner_home()?,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(root, &secrets)?;
         self.read_roots.push(root.to_path_buf());
         Ok(self)
     }
@@ -119,7 +115,8 @@ impl ProjectSandbox {
         if self.tool_files.len() >= TOOL_FILES_MAX {
             return Err(invalid("too many toolchain files"));
         }
-        clear_of_secrets(node, &self.secret_paths())?;
+        let secrets = self.secret_paths();
+        self.kept.clear(node, &secrets)?;
         if !clean_absolute(node) || !node.is_file() || canonical(node)? != *node {
             return Err(invalid("toolchain files must be existing canonical files"));
         }
@@ -139,12 +136,8 @@ impl ProjectSandbox {
         if self.tool_roots.len() >= TOOL_ROOTS_MAX {
             return Err(invalid("too many toolchain folders"));
         }
-        granted_root(
-            folder,
-            &owner_home()?,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(folder, &secrets)?;
         self.tool_roots.push(folder.to_path_buf());
         assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
         Ok(self)
@@ -159,7 +152,8 @@ impl ProjectSandbox {
         if self.links.len() >= LINKS_MAX {
             return Err(invalid("too many links to read roots"));
         }
-        clear_of_secrets(link, &self.secret_paths())?;
+        let secrets = self.secret_paths();
+        self.kept.clear(link, &secrets)?;
         let is_link =
             std::fs::symlink_metadata(link).is_ok_and(|metadata| metadata.file_type().is_symlink());
         let in_real_folder = link
@@ -196,7 +190,8 @@ impl ProjectSandbox {
     /// denied, since the agent could replace it. Input: a canonical existing regular file
     /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid`.
     pub fn allow_exec(mut self, program: &Path) -> Result<Self, SandboxError> {
-        clear_of_secrets(program, &self.secret_paths())?;
+        let secrets = self.secret_paths();
+        self.kept.clear(program, &secrets)?;
         if !clean_absolute(program) || !program.is_file() || canonical(program)? != *program {
             return Err(invalid(
                 "an allowed program must be an existing canonical file",
@@ -233,7 +228,6 @@ impl ProjectSandbox {
         mut self,
         tools: &crate::toolchains::Toolchains,
     ) -> Result<Self, SandboxError> {
-        let owner = owner_home()?;
         let secrets = self.secret_paths();
         for root in tools.roots() {
             if self.tool_roots.contains(root) {
@@ -242,12 +236,7 @@ impl ProjectSandbox {
             if self.tool_roots.len() >= TOOL_ROOTS_MAX {
                 return Err(invalid("too many toolchain folders"));
             }
-            granted_root(
-                root,
-                &owner,
-                &secrets,
-                &(self.hooks.access.harness_folders)(),
-            )?;
+            self.kept.grant(root, &secrets)?;
             self.tool_roots.push(root.clone());
         }
         for file in tools.files() {
@@ -257,7 +246,7 @@ impl ProjectSandbox {
             if self.tool_files.len() >= TOOL_FILES_MAX {
                 return Err(invalid("too many toolchain files"));
             }
-            clear_of_secrets(file, &secrets)?;
+            self.kept.clear(file, &secrets)?;
             if !clean_absolute(file) || !file.is_file() || canonical(file)? != *file {
                 return Err(invalid("toolchain files must be existing canonical files"));
             }
@@ -274,22 +263,13 @@ impl ProjectSandbox {
     /// [`Self::allow_read`]'s checks. Input: the saved folders. Output: the widened sandbox
     /// and how many folders were skipped.
     pub fn allow_extra_reads(mut self, paths: &[PathBuf]) -> Result<(Self, usize), SandboxError> {
-        let owner = owner_home()?;
         let secrets = self.secret_paths();
         let mut skipped = 0;
         for path in paths {
             if self.tool_roots.contains(path) {
                 continue;
             }
-            if self.tool_roots.len() >= TOOL_ROOTS_MAX
-                || granted_root(
-                    path,
-                    &owner,
-                    &secrets,
-                    &(self.hooks.access.harness_folders)(),
-                )
-                .is_err()
-            {
+            if self.tool_roots.len() >= TOOL_ROOTS_MAX || self.kept.grant(path, &secrets).is_err() {
                 skipped += 1;
                 continue;
             }
@@ -310,12 +290,8 @@ impl ProjectSandbox {
         if self.tool_cache.is_some() {
             return Err(invalid("the sandbox already has a tool cache"));
         }
-        granted_root(
-            root,
-            &owner_home()?,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(root, &secrets)?;
         let overlaps = self
             .writable_roots()
             .chain(self.read_roots.iter())
@@ -369,12 +345,8 @@ impl ProjectSandbox {
         if self.scratch.is_some() {
             return Err(invalid("the sandbox already has a temp folder"));
         }
-        granted_root(
-            tmp,
-            &owner_home()?,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(tmp, &secrets)?;
         self.scratch = Some(tmp.to_path_buf());
         self.confinement_kept()?;
         Ok(self)
@@ -499,12 +471,8 @@ impl ProjectSandbox {
                 "a shared writable folder must be a top-level project folder kept under its secret rule",
             ));
         }
-        granted_root(
-            folder,
-            &owner_home()?,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(folder, &secrets)?;
         if self
             .writable_roots()
             .any(|root| root.starts_with(folder) || folder.starts_with(root))
@@ -743,7 +711,7 @@ impl ProjectSandbox {
     /// `Invalid`, or `Unavailable` off macOS.
     #[cfg(unix)]
     pub fn native_team(
-        self,
+        mut self,
         own: &Path,
         mates: &Path,
         callers: &Path,
@@ -751,12 +719,8 @@ impl ProjectSandbox {
         mates_home: &Path,
     ) -> Result<(Self, Self), SandboxError> {
         let home = self.agent_home.clone();
-        granted_root(
-            mates_home,
-            &self.owner_home,
-            &self.secret_paths(),
-            &(self.hooks.access.harness_folders)(),
-        )?;
+        let secrets = self.secret_paths();
+        self.kept.grant(mates_home, &secrets)?;
         if mates_home.starts_with(&home) || home.starts_with(mates_home) {
             return Err(invalid("the teammates' home must sit beside the lead's"));
         }
@@ -765,12 +729,8 @@ impl ProjectSandbox {
             .map(|folder| home.join(folder))
             .collect();
         for folder in &shared {
-            granted_root(
-                folder,
-                &self.owner_home,
-                &self.secret_paths(),
-                &(self.hooks.access.harness_folders)(),
-            )?;
+            let secrets = self.secret_paths();
+            self.kept.grant(folder, &secrets)?;
         }
         let binding = (self.hooks.binding_path)(callers);
         let mailbox = self.agent_tmp.join(self.hooks.mailbox_folder);
@@ -907,7 +867,8 @@ impl ProjectSandbox {
         {
             return Err(invalid("the tmux socket must sit in the agent temp folder"));
         }
-        clear_of_secrets(socket, &self.secret_paths())?;
+        let secrets = self.secret_paths();
+        self.kept.clear(socket, &secrets)?;
         if !clean_absolute(tmux) || !tmux.is_file() || canonical(tmux)? != tmux {
             return Err(invalid("the tmux program must be a canonical file"));
         }
