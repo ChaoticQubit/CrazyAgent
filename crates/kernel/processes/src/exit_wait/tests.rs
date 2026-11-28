@@ -46,6 +46,7 @@ pub(crate) mod hooks {
 
     /// Makes this thread's next watches fail before they arm, so a caller's error arm runs.
     /// Input: whether to fail them. Output: none.
+    #[cfg(unix)]
     pub(crate) fn force_watch_error(on: bool) {
         WATCH_FORCED.with(|forced| forced.set(on));
         WATCH_ERROR.with(|failed| failed.set(None));
@@ -63,6 +64,7 @@ pub(crate) mod hooks {
 
     /// The process number of the child the last forced watch failure was given. Output: it,
     /// if a watch failed.
+    #[cfg(unix)]
     pub(crate) fn failed_watch_child() -> Option<u32> {
         WATCH_ERROR.with(Cell::get)
     }
