@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::redaction::Block;
 use super::*;
 
 #[cfg(unix)]
@@ -106,10 +108,17 @@ fn opens_block(earlier: &[u8], tail: &[u8], cut: bool) -> bool {
     if cut {
         rows.next();
     }
-    rows.filter_map(plain_text).fold(false, |open, row| {
-        (open || super::redaction::block_begin(&row))
-            && !row.to_ascii_lowercase().contains(KEY_BLOCK_END)
-    })
+    let block = rows
+        .filter_map(plain_text)
+        .fold(Block::Closed, |block, row| {
+            block.opened_by(&row, false).closed_by(&row)
+        });
+    assert_ne!(
+        block,
+        Block::Loose,
+        "only a PEM-shaped BEGIN opens a block here"
+    );
+    block == Block::Strict
 }
 
 /// Refuses research job output where no directory-relative no-follow read exists.
