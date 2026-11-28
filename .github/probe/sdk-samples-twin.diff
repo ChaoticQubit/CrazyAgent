@@ -1,0 +1,13 @@
+diff --git a/crates/crazyagent/src/perf_tests/sdk.rs b/crates/crazyagent/src/perf_tests/sdk.rs
+index 9fab8a2947..d43d3e1802 100644
+--- a/crates/crazyagent/src/perf_tests/sdk.rs
++++ b/crates/crazyagent/src/perf_tests/sdk.rs
+@@ -18,7 +18,7 @@ use crate::update::Channel;
+ const LEAF: &str = "perf";
+ const SECRET_NAME: &str = "openai";
+ const PASTE: &[u8] = b"sk-stand-in-owner-paste";
+-const KEYCHAIN_SAMPLES: usize = 50;
++const KEYCHAIN_SAMPLES: usize = 400;
+ const READ_BATCH: usize = 100;
+ const QUIT: [QuitSettings; 2] = [
+     QuitSettings {

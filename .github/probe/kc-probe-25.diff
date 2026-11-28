@@ -1,0 +1,52 @@
+diff --git a/crates/kernel/security/src/perf_tests/keychain.rs b/crates/kernel/security/src/perf_tests/keychain.rs
+index 733d6493e3..9b351e99d8 100644
+--- a/crates/kernel/security/src/perf_tests/keychain.rs
++++ b/crates/kernel/security/src/perf_tests/keychain.rs
+@@ -147,6 +147,39 @@ fn security_spawn() {
+     black_box(bytes);
+ }
+ 
++/// Probe: copies the fresh scratch keychain to `PROBE_KEYCHAIN_SAVE`, or deletes it and puts
++/// the file at `PROBE_KEYCHAIN_FROM` in its place as the home's default and only search-list
++/// keychain, unlocked with the empty password. Input: the keychain path, three levels under
++/// its home. Output: none; panics on a failed step.
++fn probe_swap(path: &std::path::Path) {
++    let home = path.ancestors().nth(3).unwrap();
++    let text = path.to_str().unwrap();
++    eprintln!("PROBE-KEYCHAIN {text}");
++    let security = |args: &[&str]| {
++        let ran = Command::new(SECURITY)
++            .args(args)
++            .env_clear()
++            .env("HOME", home)
++            .env("PATH", "/usr/bin:/bin")
++            .stdin(Stdio::null())
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .status()
++            .unwrap();
++        assert!(ran.success(), "probe security {:?} failed", args.first());
++    };
++    if let Some(to) = std::env::var_os("PROBE_KEYCHAIN_SAVE") {
++        std::fs::copy(path, to).unwrap();
++    }
++    if let Some(from) = std::env::var_os("PROBE_KEYCHAIN_FROM") {
++        security(&["delete-keychain", text]);
++        std::fs::copy(from, path).unwrap();
++        security(&["list-keychains", "-d", "user", "-s", text]);
++        security(&["default-keychain", "-d", "user", "-s", text]);
++        security(&["unlock-keychain", "-p", "", text]);
++    }
++}
++
+ /// Times the macOS keychain calls that touch only a scratch keychain in a temporary home
+ /// under `/tmp/ca-keychain-*`, so its path is as long as the twin build's: the name checks,
+ /// the store opened at that keychain and in that home, its writes, reads and deletes, and
+@@ -164,6 +197,7 @@ fn keychain_calls() {
+         Scratch::create(&home, PROFILE_KEYCHAIN).unwrap_or_else(|error| panic!("{error}"));
+     let agent = Scratch::create(&home.join("agent"), AGENT_KEYCHAIN)
+         .unwrap_or_else(|error| panic!("{error}"));
++    probe_swap(&scratch.path);
+     let store = Keychain::at(NAMESPACE, &scratch.path).unwrap();
+     let secret = SecretString::new(SECRET.to_vec()).unwrap();
+     let found = store.put(SERVICE, "token", &secret).unwrap();

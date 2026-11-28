@@ -1,0 +1,13 @@
+diff --git a/crates/crazyagent/src/perf_tests.rs b/crates/crazyagent/src/perf_tests.rs
+index 85c89de699..f42780fa6c 100644
+--- a/crates/crazyagent/src/perf_tests.rs
++++ b/crates/crazyagent/src/perf_tests.rs
+@@ -40,7 +40,7 @@ const HOST: &str = "api.github.com";
+ const URL: &str = "https://api.github.com/user";
+ const PASTE: &[u8] = b"sk-stand-in-owner-paste";
+ const BEARER: &[u8] = b"gho_stand-in-held-token";
+-const KEYCHAIN_SAMPLES: usize = 50;
++const KEYCHAIN_SAMPLES: usize = 400;
+ const NET_BATCH: usize = 10;
+ const READ_BATCH: usize = 100;
+ const QUIT: [QuitSettings; 2] = [
