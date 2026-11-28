@@ -197,7 +197,7 @@ pub fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> 
         },
         value,
     );
-    assert_eq!(buffer.capacity(), capacity);
+    assert!(buffer.len() <= counted.0 && buffer.capacity() == capacity);
     if let Err(problem) = written {
         wipe_owned(&mut buffer);
         return Err(problem);
@@ -226,22 +226,28 @@ impl std::io::Write for Counted {
 }
 
 /// A writer that appends to a buffer up to a limit no larger than the buffer's capacity, for
-/// [`sized_json`]'s second pass. A write that would pass the limit wipes what was written and
-/// is refused before any byte of it is pushed, so the buffer never reallocates.
+/// [`sized_json`]'s second pass. A chunk that would pass the limit is refused before any byte
+/// of it is pushed, so the buffer never reallocates; [`sized_json`] wipes it on the refusal.
+/// Each serde fragment is one inlined `write_all` with one limit check.
 struct Capped<'a> {
     buffer: &'a mut Vec<u8>,
     limit: usize,
 }
 
 impl std::io::Write for Capped<'_> {
+    #[inline]
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        assert!(self.buffer.len() <= self.limit && self.limit <= self.buffer.capacity());
+        self.write_all(bytes)?;
+        Ok(bytes.len())
+    }
+
+    #[inline]
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         if bytes.len() > self.limit - self.buffer.len() {
-            wipe_owned(self.buffer);
             return Err(std::io::Error::other(CHANGED));
         }
         self.buffer.extend_from_slice(bytes);
-        Ok(bytes.len())
+        Ok(())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
