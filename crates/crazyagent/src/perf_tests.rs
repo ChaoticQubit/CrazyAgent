@@ -1,3 +1,5 @@
+mod guard;
+
 use std::hint::black_box;
 use std::net::IpAddr;
 use std::sync::Mutex;
