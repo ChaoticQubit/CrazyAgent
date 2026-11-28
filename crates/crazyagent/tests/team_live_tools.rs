@@ -22,6 +22,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+mod owner_support;
 
 const PROJECT: &str = "live-tools";
 const WAIT: Duration = Duration::from_secs(60);
@@ -449,6 +451,7 @@ fn a_live_master_s_merge_lands_on_the_land_on_branch_through_the_engine_binary()
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let base = root.path().canonicalize().unwrap();
+    let _owner = owner_support::owner_on(&base, &base);
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     crazyagent::team::initialize(&connection).unwrap();
     crazyagent::coord::ensure(&connection).unwrap();

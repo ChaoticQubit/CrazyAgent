@@ -152,7 +152,7 @@
   "crates/crazyagent/tests/native_auth_flow.rs": 1663,
   "crates/crazyagent/tests/onboarding.rs": 3198,
   "crates/crazyagent/tests/owner_client.rs": 1738,
-  "crates/crazyagent/tests/project_sandbox.rs": 4276,
+  "crates/crazyagent/tests/project_sandbox.rs": 4006,
   "crates/crazyagent/tests/projects_home.rs": 2002,
   "crates/crazyagent/tests/projects_home_engine.rs": 2920,
   "crates/crazyagent/tests/sandbox_toolchains.rs": 2774,
