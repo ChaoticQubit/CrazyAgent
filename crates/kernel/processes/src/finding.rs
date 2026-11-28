@@ -1192,8 +1192,9 @@ struct Unreadable;
 /// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
 /// it cannot read, which the system still runs, a line holding `#`, where the system
 /// ends it, and an `-S` line with a word holding `$`, `\`, `"` or `'`, which `env` splits
-/// otherwise, are [`Unreadable`]. Input: the real file. Output: the line, none for a file
-/// that is not a script, or [`Unreadable`] for any other first line.
+/// otherwise, are [`Unreadable`]. On Windows one carriage return right before the newline
+/// that ends the line is read away, as Windows Node ships npm's scripts. Input: the real file.
+/// Output: the line, none for a file that is not a script, or [`Unreadable`] otherwise.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
@@ -1213,7 +1214,13 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     if end.is_none() && head.len() == SCRIPT_HEAD_BYTES_MAX {
         return Err(Unreadable);
     }
-    let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())]).map_err(|_| Unreadable)?;
+    let text = &line[..end.unwrap_or(line.len())];
+    #[cfg(windows)]
+    let text = match end {
+        Some(at) if line[at] == b'\n' => text.strip_suffix(b"\r").unwrap_or(text),
+        _ => text,
+    };
+    let line = std::str::from_utf8(text).map_err(|_| Unreadable)?;
     if line
         .chars()
         .any(|c| (c.is_control() && c != '\t') || c == '#')
