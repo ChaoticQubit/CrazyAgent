@@ -208,11 +208,25 @@ fn secret_home() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
     (folder, home, secrets)
 }
 
+/// Checks a path as a sandbox build does, through a [`Kept`] of the owner home, `.claude`
+/// and `secrets`, and [`Kept::clear`]. Inputs: the owner home, the path and the secret paths.
+/// Output: unit, or the build's refusal.
+fn kept_clear(home: &Path, root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+    Kept::of(home, &harness_homes(home, &[".claude"]), secrets)?.clear(root, secrets)
+}
+
+/// Checks a root as a sandbox build grants it, through a [`Kept`] of the owner home,
+/// `.claude` and `secrets`, and [`Kept::grant`]. Inputs: the root, the owner home and the
+/// secret paths, which hold `.claude`. Output: unit, or the build's refusal.
+fn kept_grant(root: &Path, home: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+    Kept::of(home, &harness_homes(home, &[".claude"]), secrets)?.grant(root, secrets)
+}
+
 /// True when the root is refused as one that holds or sits in a secret path. Inputs: the
-/// root and the secret paths. Output: the answer.
-fn secret_refused(root: &Path, secrets: &[PathBuf]) -> bool {
+/// owner home, the root and the secret paths. Output: the answer.
+fn secret_refused(home: &Path, root: &Path, secrets: &[PathBuf]) -> bool {
     matches!(
-        clear_of_secrets(root, secrets),
+        kept_clear(home, root, secrets),
         Err(SandboxError::Invalid(reason)) if reason == SECRET_ROOT_REFUSED
     )
 }
@@ -223,10 +237,19 @@ fn secret_refused(root: &Path, secrets: &[PathBuf]) -> bool {
 #[test]
 fn a_root_spelled_in_another_case_than_a_secret_is_refused() {
     let (_folder, home, secrets) = secret_home();
-    assert!(secret_refused(&home.join(".SSH"), &secrets));
-    assert!(secret_refused(&home.join(".SSH").join("keys"), &secrets));
-    assert!(secret_refused(&home.join(".Aws").join("new"), &secrets));
+    assert!(secret_refused(&home, &home.join(".SSH"), &secrets));
     assert!(secret_refused(
+        &home,
+        &home.join(".SSH").join("keys"),
+        &secrets
+    ));
+    assert!(secret_refused(
+        &home,
+        &home.join(".Aws").join("new"),
+        &secrets
+    ));
+    assert!(secret_refused(
+        &home,
         &home.join(".s\u{200C}sh").join("new"),
         &secrets
     ));
@@ -239,9 +262,10 @@ fn a_root_spelled_in_another_case_than_a_secret_is_refused() {
 fn a_root_spelled_with_the_kelvin_sign_is_refused() {
     let (_folder, home, secrets) = secret_home();
     let kelvin = home.join("Library").join("\u{212A}eychains");
-    assert!(secret_refused(&kelvin, &secrets));
-    assert!(secret_refused(&kelvin.join("new"), &secrets));
+    assert!(secret_refused(&home, &kelvin, &secrets));
+    assert!(secret_refused(&home, &kelvin.join("new"), &secrets));
     assert!(secret_refused(
+        &home,
         &home.join(".\u{212A}ube").join("new"),
         &secrets
     ));
@@ -252,8 +276,8 @@ fn a_root_spelled_with_the_kelvin_sign_is_refused() {
 #[test]
 fn a_root_holding_a_secret_spelled_in_another_case_is_refused() {
     let (_folder, home, secrets) = secret_home();
-    assert!(secret_refused(&home.join("library"), &secrets));
-    assert!(secret_refused(&home.join("LIBRARY"), &secrets));
+    assert!(secret_refused(&home, &home.join("library"), &secrets));
+    assert!(secret_refused(&home, &home.join("LIBRARY"), &secrets));
 }
 
 /// A root under a folder its metadata cannot be read through is refused, since the check
@@ -266,7 +290,7 @@ fn a_metadata_read_error_refuses_the_root() {
     let shut = home.join("work").join("shut");
     std::fs::create_dir_all(shut.join("inner")).unwrap();
     std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let refused = secret_refused(&shut.join("inner"), &secrets);
+    let refused = secret_refused(&home, &shut.join("inner"), &secrets);
     std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(refused);
 }
@@ -277,8 +301,8 @@ fn a_metadata_read_error_refuses_the_root() {
 #[test]
 fn a_new_folder_outside_ascii_is_refused_only_where_a_secret_may_be() {
     let (_folder, home, secrets) = secret_home();
-    assert!(clear_of_secrets(&home.join("work").join("\u{65B0}"), &secrets).is_ok());
-    assert!(secret_refused(&home.join("\u{65B0}"), &secrets));
+    assert!(kept_clear(&home, &home.join("work").join("\u{65B0}"), &secrets).is_ok());
+    assert!(secret_refused(&home, &home.join("\u{65B0}"), &secrets));
 }
 
 /// The owner home inside a root spelled in another case, and a root inside a harness folder
@@ -287,7 +311,7 @@ fn a_new_folder_outside_ascii_is_refused_only_where_a_secret_may_be() {
 #[test]
 fn granted_roots_compare_the_owner_and_harness_folders_by_entry() {
     let (folder, home, secrets) = secret_home();
-    let refusal = |root: &Path| match granted_root(root, &home, &secrets, &[".claude"]) {
+    let refusal = |root: &Path| match kept_grant(root, &home, &secrets) {
         Err(SandboxError::Invalid(reason)) => reason,
         other => format!("{other:?}"),
     };
@@ -311,8 +335,8 @@ fn granted_roots_compare_the_owner_and_harness_folders_by_entry() {
 fn on_linux_a_root_spelled_in_another_case_is_another_folder() {
     let (_folder, home, secrets) = secret_home();
     std::fs::create_dir_all(home.join(".SSH")).unwrap();
-    assert!(clear_of_secrets(&home.join(".SSH"), &secrets).is_ok());
-    assert!(secret_refused(&home.join(".ssh"), &secrets));
+    assert!(kept_clear(&home, &home.join(".SSH"), &secrets).is_ok());
+    assert!(secret_refused(&home, &home.join(".ssh"), &secrets));
 }
 
 /// A root not made yet, named through a link to the folder that holds a secret still to
@@ -325,9 +349,17 @@ fn a_new_root_through_a_link_to_a_missing_secret_is_refused() {
     assert!(!home.join(".aws").exists());
     let alias = folder.path().join("alias");
     std::os::unix::fs::symlink(&home, &alias).unwrap();
-    assert!(secret_refused(&alias.join(".aws"), &secrets));
-    assert!(secret_refused(&alias.join(".aws").join("new"), &secrets));
-    assert!(secret_refused(&home.join(".aws"), &[alias.join(".aws")]));
+    assert!(secret_refused(&home, &alias.join(".aws"), &secrets));
+    assert!(secret_refused(
+        &home,
+        &alias.join(".aws").join("new"),
+        &secrets
+    ));
+    assert!(secret_refused(
+        &home,
+        &home.join(".aws"),
+        &[alias.join(".aws")]
+    ));
 }
 
 /// On Linux names do not fold: a root not made yet, named through a link to the folder that
@@ -341,7 +373,7 @@ fn on_linux_a_new_root_beside_a_missing_secret_is_not_refused() {
     std::os::unix::fs::symlink(&home, &alias).unwrap();
     for name in ["project", ".AWS", "\u{65B0}"] {
         assert!(
-            clear_of_secrets(&alias.join(name), &secrets).is_ok(),
+            kept_clear(&home, &alias.join(name), &secrets).is_ok(),
             "{name}"
         );
     }
@@ -356,11 +388,11 @@ fn a_root_reaching_a_secret_through_a_link_is_refused() {
     std::fs::create_dir_all(home.join(".ssh").join("inner")).unwrap();
     let link = home.join("work").join("link");
     std::os::unix::fs::symlink(home.join(".ssh").join("inner"), &link).unwrap();
-    assert!(secret_refused(&link.join("new"), &secrets));
+    assert!(secret_refused(&home, &link.join("new"), &secrets));
     let dotfiles = folder.path().join("dotfiles");
     std::fs::create_dir_all(dotfiles.join("aws")).unwrap();
     std::os::unix::fs::symlink(dotfiles.join("aws"), home.join(".aws")).unwrap();
-    assert!(secret_refused(&dotfiles, &secrets));
+    assert!(secret_refused(&home, &dotfiles, &secrets));
 }
 
 /// A harness home that is a link: the folder it leads to, a folder inside that and a folder
@@ -389,16 +421,20 @@ fn a_harness_home_that_is_a_link_refuses_the_folder_it_leads_to() {
     }
     for typed in &typed {
         let real = canonical(typed).unwrap();
-        assert!(secret_refused(&real, &secrets), "{}", typed.display());
         assert!(
-            granted_root(&real, &home, &secrets, &[".claude"]).is_err(),
+            secret_refused(&home, &real, &secrets),
+            "{}",
+            typed.display()
+        );
+        assert!(
+            kept_grant(&real, &home, &secrets).is_err(),
             "{}",
             typed.display()
         );
     }
     for inside in [target.clone(), target.join("projects")] {
         let real = canonical(&inside).unwrap();
-        match granted_root(&real, &home, &[], &[".claude"]) {
+        match kept_grant(&real, &home, &[home.join(".claude")]) {
             Err(SandboxError::Invalid(reason)) => {
                 assert_eq!(reason, "sandbox roots must not be owner harness homes")
             }
@@ -426,7 +462,7 @@ fn workspace_home() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>, PathBuf) {
 /// the owner home and the secret paths. Output: the reason.
 #[cfg(any(unix, windows))]
 fn granted_refusal(root: &Path, home: &Path, secrets: &[PathBuf]) -> Option<String> {
-    match granted_root(root, home, secrets, &[".claude"]) {
+    match kept_grant(root, home, secrets) {
         Ok(()) => None,
         Err(SandboxError::Invalid(reason)) => Some(reason),
         Err(other) => Some(format!("{other:?}")),
@@ -460,14 +496,14 @@ fn a_root_holding_where_a_dangling_secret_link_leads_is_refused() {
             _ => unreachable!(),
         };
         made.unwrap();
-        assert!(secret_refused(&private, &secrets), "{case}");
+        assert!(secret_refused(&home, &private, &secrets), "{case}");
         assert_eq!(
             granted_refusal(&private, &home, &secrets).as_deref(),
             Some(SECRET_ROOT_REFUSED),
             "{case}"
         );
         let other = workspace.join("other");
-        assert!(clear_of_secrets(&other, &secrets).is_ok(), "{case}");
+        assert!(kept_clear(&home, &other, &secrets).is_ok(), "{case}");
         assert_eq!(granted_refusal(&other, &home, &secrets), None, "{case}");
     }
 }
@@ -486,9 +522,9 @@ fn a_dangling_secret_link_refuses_only_the_folders_above_where_it_leads() {
         .join("ssh");
     std::os::unix::fs::symlink(target, home.join(".ssh")).unwrap();
     let private = workspace.join("private");
-    assert!(clear_of_secrets(&private, &secrets).is_ok());
+    assert!(kept_clear(&home, &private, &secrets).is_ok());
     assert_eq!(granted_refusal(&private, &home, &secrets), None);
-    assert!(secret_refused(&workspace, &secrets));
+    assert!(secret_refused(&home, &workspace, &secrets));
     assert_eq!(
         granted_refusal(&workspace, &home, &secrets).as_deref(),
         Some(SECRET_ROOT_REFUSED)
@@ -574,14 +610,14 @@ fn on_windows_a_root_holding_where_a_dangling_secret_link_or_junction_leads_is_r
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
             "{case}"
         );
-        assert!(secret_refused(&private, &secrets), "{case}");
+        assert!(secret_refused(&home, &private, &secrets), "{case}");
         assert_eq!(
             granted_refusal(&private, &home, &secrets).as_deref(),
             Some(SECRET_ROOT_REFUSED),
             "{case}"
         );
         let other = workspace.join("other");
-        assert!(clear_of_secrets(&other, &secrets).is_ok(), "{case}");
+        assert!(kept_clear(&home, &other, &secrets).is_ok(), "{case}");
         assert_eq!(granted_refusal(&other, &home, &secrets), None, "{case}");
     }
 }
