@@ -101,7 +101,7 @@ pub fn wipe_owned(buffer: &mut Vec<u8>) {
     assert!(buffer.is_empty());
 }
 
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+pub(crate) const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// One part of a text that holds a secret, as [`sized`] writes it.
 pub enum Piece<'a> {
