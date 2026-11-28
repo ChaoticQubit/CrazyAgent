@@ -249,6 +249,7 @@ fn one_access_listing_reads_a_whole_path_and_a_grant_reads_changeable_on_the_nex
     let tool = folder.join("tmux");
     write_mode(&tool, "#!/bin/sh\n", 0o755);
     settle(&[&tool, &folder, &kit, temp.path()]);
+    acl::record_listings();
     let touching = |listings: Vec<Vec<PathBuf>>| -> Vec<Vec<PathBuf>> {
         listings
             .into_iter()
@@ -412,6 +413,7 @@ fn busy_folder_changed_at(at: u32, change: fn(&Path)) -> Option<PathBuf> {
     let tool = folder.join("tmux");
     write_mode(&tool, "#!/bin/sh\n", 0o755);
     settle(&[&folder, &tool]);
+    acl::record_listings();
     acl::take_listings();
     let busy = folder.clone();
     acl::after_next_listing(move || churn_then(busy, 0, 0, at, change));
@@ -442,6 +444,7 @@ fn a_shared_folder_gaining_files_through_every_listing_reads_changeable() {
     .unwrap_or_else(|error| panic!("chmod +a on {folder:?}: {error}"));
     assert!(status.success(), "chmod +a on {folder:?}");
     settle(&[&folder, &tool]);
+    acl::record_listings();
     acl::take_listings();
     let busy = folder.clone();
     acl::after_next_listing(move || churn(busy, 0));

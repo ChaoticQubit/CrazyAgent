@@ -186,11 +186,16 @@ fn list_entries(
 ) -> (Vec<Option<bool>>, Vec<Option<Vec<Entry>>>) {
     assert_eq!(entries.len(), stamps.len());
     #[cfg(test)]
-    LISTINGS.with(|listings| {
-        listings
-            .borrow_mut()
-            .push(entries.iter().map(|entry| entry.to_path_buf()).collect())
-    });
+    if RECORD_LISTINGS.with(std::cell::Cell::get) {
+        LISTINGS.with(|listings| {
+            let mut listings = listings.borrow_mut();
+            assert!(
+                listings.len() < LISTINGS_MAX,
+                "a row kept {LISTINGS_MAX} listings"
+            );
+            listings.push(entries.iter().map(|entry| entry.to_path_buf()).collect())
+        });
+    }
     let trusted = trusted();
     let (answers, lists): (Vec<Option<bool>>, Vec<Option<Vec<Entry>>>) = entries
         .iter()
@@ -241,9 +246,25 @@ pub(super) fn read_answer(read: Option<&[Entry]>, trusted: Option<&[[u8; 16]]>) 
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
-    /// The entries of each access read this test thread ran, in order.
+    /// The entries of each access read this test thread ran since it asked to record them,
+    /// in order.
     static LISTINGS: std::cell::RefCell<Vec<Vec<std::path::PathBuf>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Whether this test thread asked to record its access reads; off until it does.
+    static RECORD_LISTINGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The most access reads one test thread records, so a row that would keep more fails.
+#[cfg(all(test, target_os = "macos"))]
+const LISTINGS_MAX: usize = 4096;
+#[cfg(all(test, target_os = "macos"))]
+const _: () = assert!(LISTINGS_MAX >= 64 && LISTINGS_MAX <= 65_536);
+
+/// Makes this test thread record the entries of each access read from now on, for a row
+/// that reads them back ([`take_listings`], [`last_listing`]). Output: none.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn record_listings() {
+    RECORD_LISTINGS.with(|record| record.set(true));
 }
 
 #[cfg(all(test, target_os = "macos"))]
