@@ -6,6 +6,10 @@ pub mod batch;
 /// refuses an unconfined one where this machine requires confinement.
 #[cfg(unix)]
 pub mod editor;
+/// Waits on a child's exit as it happens, with no timed poll: a process descriptor on Linux,
+/// a waiter thread elsewhere on Unix, the process handle on Windows, and one reap that
+/// always follows the waiter's answer.
+pub mod exit_wait;
 pub mod fd_wait;
 /// Program finding: where the engine looks for the tools it runs, which files it refuses
 /// and why, with the engine's own checks passed in ([`finding::FindingHooks`]).

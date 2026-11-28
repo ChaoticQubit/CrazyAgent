@@ -29,5 +29,5 @@ pub use win::runs_under;
 pub use win::{
     BoundaryError, ProcessTree, changeable_part, container_sid, elevated, file_id, final_name,
     listener_beside, owner_only, program_trusted, release, run, system_folder,
-    unreadable_drive_root, unreadable_read_root, unreadable_root,
+    unreadable_drive_root, unreadable_read_root, unreadable_root, wait_for_exit,
 };

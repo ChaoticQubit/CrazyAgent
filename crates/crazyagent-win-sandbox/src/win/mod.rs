@@ -1,5 +1,6 @@
 mod acl;
 mod container;
+mod exit_wait;
 mod file_id;
 mod images;
 mod job;
@@ -13,6 +14,7 @@ mod record;
 mod system;
 mod tree;
 
+pub use exit_wait::wait_for_exit;
 pub use file_id::file_id;
 pub use images::runs_under;
 pub use listeners::listener_beside;
