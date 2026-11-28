@@ -58,11 +58,14 @@ fn the_host_binding_is_generated_for_every_capability() {
     let mut stems: Vec<&str> = loaded.iter().map(|(stem, _)| stem.as_str()).collect();
     stems.sort_unstable();
     assert!(stems.len() >= 6);
-    let used = format!(
-        "usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{{{}}};",
-        stems.join(",")
+    let joined = stems.join(",");
+    let used = format!("usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{{{joined}}};");
+    let wrapped =
+        format!("usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{{{joined},}};");
+    assert!(
+        flat.starts_with(&used) || flat.starts_with(&wrapped),
+        "{used} or {wrapped}"
     );
-    assert!(flat.starts_with(&used), "{used}");
     let fields: String = stems
         .iter()
         .map(|stem| format!("pub{stem}:&'pdyn{stem}::Provide,"))
