@@ -42,6 +42,9 @@ mod live_terminal_probe_tests;
 #[path = "freeze_tests.rs"]
 mod freeze_tests;
 
+#[path = "start_line_tests.rs"]
+mod start_line_tests;
+
 #[path = "hidden_seers_tests.rs"]
 mod hidden_seers_tests;
 
@@ -30483,10 +30486,6 @@ fn an_agent_refused_for_an_mcp_secret_in_its_command_names_the_server_and_the_se
         start_problem(&named),
         "The agent could not start. The MCP server \"tools\" secret \"API_TOKEN\" is part of \
          the launch command, so it cannot be kept hidden. Replace it in Plugins."
-    );
-    assert_eq!(
-        start_problem(&LaunchError("launch_deadline".into(), None)),
-        "The agent could not start. (launch_deadline)"
     );
 }
 

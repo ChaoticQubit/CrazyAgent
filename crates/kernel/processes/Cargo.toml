@@ -15,6 +15,7 @@ test-support = ["dep:tempfile"]
 [dependencies]
 base64 = "=0.22.1"
 crazyagent-kernel-common = { path = "../common" }
+dunce = "=1.0.5"
 minisign-verify = "=0.3.0"
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }

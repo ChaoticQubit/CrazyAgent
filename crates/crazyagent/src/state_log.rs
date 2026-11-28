@@ -189,6 +189,19 @@ pub fn redact_matching(
     )?)
 }
 
+/// How many compiled statements an engine connection keeps. One append runs about a dozen
+/// fixed statements, and the engine's other writers run their own, so the cache holds them
+/// all and no save compiles its SQL again.
+const STATEMENTS_CACHED: usize = 64;
+
+/// Readies an engine connection for log writes: a statement cache of [`STATEMENTS_CACHED`]
+/// and the namespace tables plugins append to. The engine open and every store built as the
+/// engine builds one run it. Input: the connection. Output: Ok, or the store's refusal.
+pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
+    db.set_prepared_statement_cache_capacity(STATEMENTS_CACHED);
+    Ok(kernel_storage::namespace::initialize(db)?)
+}
+
 /// The kernel hook for a writer's fence: [`fence::check`] on the appending transaction,
 /// its refusal text unchanged. Input: the fence. Output: the hook.
 fn hook(fence: Fence) -> FenceCheck {

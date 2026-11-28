@@ -13386,8 +13386,8 @@ fn mates_home_problem(error: &EngineError) -> String {
 
 /// The owner's line for an agent whose harness could not start: a command that would hold
 /// an MCP secret names its server and secret, skills left in a Codex home or a home reset
-/// past its walk budget say so, and any other refusal names its plain code. Input: the
-/// launch error. Output: the line.
+/// past its walk budget say so, a terminal refusal gives its plain sentence, and every one
+/// names its plain code. Input: the launch error. Output: the line.
 fn start_problem(problem: &LaunchError) -> String {
     match crate::launch_context::secret_in_command_text(problem) {
         Some(sentence) => format!("The agent could not start. {sentence}"),
@@ -13398,7 +13398,7 @@ fn start_problem(problem: &LaunchError) -> String {
         None if problem.0 == crate::team::cleanup::WALK_TOO_LONG => {
             with_code(WALK_TOO_LONG_PROBLEM, Some(&problem.0))
         }
-        None => with_code("The agent could not start", Some(&problem.0)),
+        None => crate::terminal::start_refused(&problem.0),
     }
 }
 

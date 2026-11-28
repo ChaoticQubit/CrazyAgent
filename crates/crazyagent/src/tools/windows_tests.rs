@@ -91,9 +91,9 @@ fn codex_shim(folder: &Path) -> (PathBuf, PathBuf) {
 /// V243-WIN-HARNESS-SEARCH: the harness search tries `<name>.exe` then `<name>.cmd` in each
 /// folder in order, so a shim in an earlier folder comes before a program in a later one;
 /// npm's extensionless sh file and a `.cmd` that is no npm cmd-shim are never found, and the
-/// pin of a shim is the script it names.
+/// pin of a shim is the script it names. Fails naming the variable when SystemRoot is not set.
 #[test]
-fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() {
+fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() -> Result<(), String> {
     let root = tempfile::tempdir().unwrap();
     let root = root.path().canonicalize().unwrap();
     let [first, second, other] = ["first", "second", "other"].map(|name| {
@@ -104,7 +104,7 @@ fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() {
     let (first_shim, first_script) = codex_shim(&first);
     std::fs::write(first.join("codex"), "#!/bin/sh\n").unwrap();
     let (second_shim, _) = codex_shim(&second);
-    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+    let shipped = PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?)
         .join("System32")
         .join("where.exe");
     std::fs::copy(&shipped, second.join("codex.exe")).unwrap();
@@ -127,6 +127,7 @@ fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() {
         ["codex.exe", "codex.cmd"]
     );
     assert_eq!(crate::paths::executable_names("codex.cmd"), ["codex.cmd"]);
+    Ok(())
 }
 
 /// The last good side file is written private to the engine's user, so the private read

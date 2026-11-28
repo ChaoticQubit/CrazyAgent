@@ -22,6 +22,55 @@ const STATUS_OUTPUT: &str =
 const TEXT: &str = "the engine service is not installed";
 const ON_IMAGE: &str = "/Volumes/CrazyAgent/CrazyAgent.app/Contents/MacOS/crazyagent";
 
+/// Times each kind of call the held walk of a socket's path makes, alone, on the socket's
+/// own folder: an open for search and its close, a read through the held folder with its
+/// access list, a read of the socket by name through that folder, a volume read, and one
+/// `lstat` of the socket for scale. Input: the socket. Output: none; prints one PERF line
+/// per call kind.
+fn held_steps(socket: &Path) {
+    use std::os::fd::AsFd;
+    let folder = socket.parent().expect("the socket sits in a folder");
+    let name = std::ffi::CString::new(folder.as_os_str().as_encoded_bytes()).unwrap();
+    let leaf = std::ffi::CString::new(socket.file_name().unwrap().as_encoded_bytes()).unwrap();
+    let held = crazyagent_macos_fs::open_search(None, &name, false).unwrap();
+    let read = crazyagent_macos_fs::held_entry(held.as_fd()).unwrap();
+    assert!(read.folder() && !read.link());
+    let device = read.device;
+    time(
+        &row("service.changeable.held.open_close", FILES),
+        SAMPLES,
+        || {
+            drop(black_box(
+                crazyagent_macos_fs::open_search(None, black_box(&name), false).unwrap(),
+            ));
+        },
+    );
+    time(
+        &row("service.changeable.held.entry", FILES),
+        SAMPLES,
+        || {
+            black_box(crazyagent_macos_fs::held_entry(held.as_fd()).unwrap());
+        },
+    );
+    time(
+        &row("service.changeable.held.entry_at", FILES),
+        SAMPLES,
+        || {
+            black_box(crazyagent_macos_fs::held_entry_at(Some(held.as_fd()), &leaf).unwrap());
+        },
+    );
+    time(
+        &row("service.changeable.held.volume", FILES),
+        SAMPLES,
+        || {
+            black_box(crazyagent_macos_fs::held_volume_keeps_lists(held.as_fd(), device).unwrap());
+        },
+    );
+    time(&row("service.changeable.lstat", FILES), SAMPLES, || {
+        black_box(std::fs::symlink_metadata(black_box(socket)).unwrap());
+    });
+}
+
 fn row(name: &'static str, batch: usize) -> Row {
     Row {
         layer: 1,
@@ -294,6 +343,7 @@ fn service_calls() {
             black_box(changeable_above_socket(black_box(&socket)));
         },
     );
+    held_steps(&socket);
     time(&row("service.cli_link.link_cli", ONE), SAMPLES, || {
         black_box(link_cli(&service.executable, &bin).unwrap());
     });

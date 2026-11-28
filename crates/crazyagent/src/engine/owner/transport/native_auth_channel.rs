@@ -485,7 +485,7 @@ impl NativeAuthCustodyLaunch {
     ) -> Result<(), EngineError> {
         use std::io::Write;
         self.delivered = true;
-        input.write_all(&*self.token).map_err(io_error)?;
+        input.write_all(&**self.token).map_err(io_error)?;
         drop(input);
         Ok(())
     }
@@ -499,7 +499,7 @@ impl Drop for NativeAuthCustodyLaunch {
             && let Ok(mut slot) = authority.native_auth.lock()
             && let Some(slot) = slot.as_mut()
             && !slot.attached
-            && bool::from(slot.token.ct_eq(&*self.token))
+            && bool::from(slot.token.ct_eq(&**self.token))
         {
             slot.attached = true;
             slot.live.store(false, Ordering::SeqCst);
@@ -1052,7 +1052,7 @@ impl OwnerRuntimeHandle {
             Ok(current) => current,
             Err(_) => return Err((failure("native_auth_recovery_required"), Box::new(work))),
         };
-        if current.as_ref().is_some_and(NativeAuthSlot::cached) {
+        if current.as_deref().is_some_and(NativeAuthSlot::cached) {
             current.take();
         }
         if current.is_some() {
@@ -1069,7 +1069,7 @@ impl OwnerRuntimeHandle {
             #[cfg(unix)]
             admission: admission.clone(),
         };
-        *current = Some(NativeAuthSlot {
+        *current = Some(Box::new(NativeAuthSlot {
             token: owner_token(),
             deadline: Instant::now() + operation_bound(&fact),
             fact,
@@ -1089,7 +1089,7 @@ impl OwnerRuntimeHandle {
             committed: false,
             progress: None,
             claude_progress: None,
-        });
+        }));
         assert!(current.as_ref().is_some_and(|slot| {
             slot.dispatch.is_none() && slot.child.is_none() && slot.dispatch_task.is_some()
         }));
@@ -1436,8 +1436,8 @@ impl Authority {
         let file = slot.held()?;
         self.root.verify_key(KEYS[index], file, slot.identity)?;
         let mut actual = owner_token();
-        file.read_exact_at(&mut *actual, 0).map_err(io_error)?;
-        if !bool::from(slot.token.ct_eq(&*actual)) || self.root.socket_identity()? != self.socket {
+        file.read_exact_at(&mut **actual, 0).map_err(io_error)?;
+        if !bool::from(slot.token.ct_eq(&**actual)) || self.root.socket_identity()? != self.socket {
             return Err(failure("owner_capability_content_changed"));
         }
         Ok(())
@@ -1454,7 +1454,7 @@ impl Authority {
             .native_auth
             .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
-        if !preparing && current.as_ref().is_some_and(NativeAuthSlot::cached) {
+        if !preparing && current.as_deref().is_some_and(NativeAuthSlot::cached) {
             current.take();
         }
         if preparing {
@@ -1473,14 +1473,14 @@ impl Authority {
             return Err(failure("native_auth_host_busy"));
         }
         let mut token = owner_token();
-        getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
+        getrandom::fill(&mut **token).map_err(|_| failure("owner_entropy_unavailable"))?;
         if let Some(slot) = current.as_mut() {
-            slot.token = token.clone();
+            slot.token = crate::engine::secret_frame::owner_token_copy(&token);
             slot.dispatch = Some(Arc::new(dispatch));
             slot.attached = false;
         } else {
-            *current = Some(NativeAuthSlot {
-                token: token.clone(),
+            *current = Some(Box::new(NativeAuthSlot {
+                token: crate::engine::secret_frame::owner_token_copy(&token),
                 fact: dispatch.fact().clone(),
                 admission: dispatch.admission().clone(),
                 deadline: Instant::now() + operation_bound(dispatch.fact()),
@@ -1497,7 +1497,7 @@ impl Authority {
                 committed: false,
                 progress: None,
                 claude_progress: None,
-            });
+            }));
         }
         assert!(
             current
@@ -2369,7 +2369,7 @@ impl NativeAuthCustodyChannel {
         }
         let packet = crate::engine::secret_frame::owner_packet(b"CAN1", 0, &token);
         drop(token);
-        stream.write_all(&*packet).await.map_err(io_error)?;
+        stream.write_all(&**packet).await.map_err(io_error)?;
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,

@@ -446,7 +446,7 @@ impl TerminalSession {
         if let Some(code) = agent_pane_unavailable(std::env::consts::OS) {
             return Err(failure(code));
         }
-        let (request, relay) = route(request)?;
+        let (request, relay, _launching) = route(request)?;
         let home = request.account.home().to_path_buf();
         let key = write_key_file(&request)?;
         let cwd = request

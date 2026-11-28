@@ -6,7 +6,7 @@ use crazyagent::harnesses::update::{HarnessVersions, INSTALL_LIST_INVALID, Updat
 const HARNESS_ID_BYTES_MAX: usize = 64;
 const UNKNOWN_HARNESS: &str = "harness_update_unknown_harness";
 const OUTCOME_UNKNOWN: &str = "harness_update_outcome_unknown";
-const HARNESS_CODES: [&str; 29] = [
+const HARNESS_CODES: [&str; 30] = [
     "harness_update_unknown_install",
     "harness_update_with_app",
     "harness_update_tool_missing",
@@ -17,6 +17,7 @@ const HARNESS_CODES: [&str; 29] = [
     "harness_update_check_only",
     "harness_update_busy",
     "harness_update_in_use",
+    "harness_launch_updating",
     "harness_update_not_installed",
     "harness_update_timeout",
     "harness_update_failed",

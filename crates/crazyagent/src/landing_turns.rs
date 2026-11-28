@@ -146,17 +146,19 @@ fn catch_up_with(
 /// refusal the clash goes to its agent as Task 7's update and the owner, told at the turn
 /// end that the edits wait in Changes, hears that they went back; after the set or main
 /// moved the check may start another regeneration; a step that cannot run is logged by its
-/// plain code and the set waits for the owner. Inputs: the store, the set, whether
-/// another regeneration may start and the owner's settings files.
+/// plain code and the set waits for the owner. Inputs: the store, the set, the refusal or
+/// None when another regeneration may start, and the owner's settings files.
 fn after_regeneration(
     db: &Connection,
     id: &ChangeSetId,
-    again: bool,
+    refusal: Option<&landing::went_back::Refusal>,
     settings: Option<&(PathBuf, PathBuf)>,
 ) {
-    let after = again.then_some(after_regeneration as landing::AfterRegeneration);
+    let after = refusal
+        .is_none()
+        .then_some(after_regeneration as landing::AfterRegeneration);
     let told = catch_up_with(db, id, after, settings).and_then(|back| match back {
-        true => tell_owner_it_went_back(db, id),
+        true => tell_owner_it_went_back(db, id, refusal),
         false => Ok(()),
     });
     if let Err(problem) = told {
@@ -168,15 +170,16 @@ fn after_regeneration(
 }
 
 /// Leaves the owner a note in the team conversation that a set the turn end said waits in
-/// Changes went back to its agent. Inputs: the store and the set. Output: Ok once written,
-/// or the plain refusal.
-fn tell_owner_it_went_back(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+/// Changes went back to its agent, and why when a regeneration refused it. Inputs: the
+/// store, the set and the refusal, if one. Output: Ok once written, or the plain refusal.
+fn tell_owner_it_went_back(
+    db: &Connection,
+    id: &ChangeSetId,
+    refusal: Option<&landing::went_back::Refusal>,
+) -> Result<(), EngineError> {
     let project = set_project(db, id)?;
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
-    let note = format!(
-        "The edits from {} went back to it to take in newer work, so they are not waiting for you in Changes yet.",
-        set.agent.label
-    );
+    let note = landing::went_back::went_back_note(&set.agent.label, refusal);
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     crate::team::append_message(
         &tx,

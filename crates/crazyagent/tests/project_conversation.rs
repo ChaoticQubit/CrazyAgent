@@ -898,7 +898,7 @@ async fn discarded_real_socket_ack_reconciles_one_atomic_effect_and_event() {
         kernel_processes::spawn_gate::connect_unix(service.owner_path.join("owner.sock"))
             .await
             .unwrap();
-    stream.write_all(&*auth).await.unwrap();
+    stream.write_all(&**auth).await.unwrap();
     stream
         .write_all(&encode_frame(&exact).unwrap())
         .await
