@@ -1,5 +1,5 @@
 use crate::perf_kit::{
-    FLAME_SECS_DEFAULT, Plan, Row, SAMPLES_MIN, flame, line, line_ns, plan, rank, skip, time,
+    FLAME_SECS_DEFAULT, Plan, Row, SAMPLES_MIN, flame, line, line_ns, plan, rank, run, skip, time,
 };
 
 fn row(name: &'static str, batch: usize) -> Row {
@@ -151,5 +151,11 @@ fn a_skipped_row_calls_its_step_untimed_as_often_as_timing_it_would() {
     let mut skipped = 0_usize;
     let printed = skip(&row("names.is_dotted", 3), SAMPLES_MIN, || skipped += 1);
     assert_eq!(skipped, timed);
+    assert!(printed.is_empty());
+    let mut planned = 0_usize;
+    let printed = run(Plan::Skip, &row("names.is_dotted", 3), SAMPLES_MIN, || {
+        planned += 1
+    });
+    assert_eq!(planned, timed);
     assert!(printed.is_empty());
 }
