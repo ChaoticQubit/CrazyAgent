@@ -295,6 +295,19 @@ impl Drop for Renewal {
     }
 }
 
+/// The owner's line for an agent start refused with `code`: the plain sentence for a
+/// terminal code `plain_reason` names, then the plain code in parentheses; any other code
+/// gets the bare line and its code. Takes the code. Returns the line.
+pub fn start_refused(code: &str) -> String {
+    let reason = plain_reason(code);
+    let code = crate::protocol::plain_code(code);
+    if code.starts_with("terminal_") && reason != plain_reason("") {
+        format!("The agent could not start. {reason} ({code})")
+    } else {
+        format!("The agent could not start. ({code})")
+    }
+}
+
 /// Turns a terminal code into the sentence clients show, such as for a refused attach.
 /// Takes the code from `HostError`, `TerminalFrame::Rejected` or `TerminalFrame::Closed`.
 /// Returns plain words without internal terms.
