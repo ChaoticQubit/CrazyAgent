@@ -1052,7 +1052,7 @@ impl OwnerRuntimeHandle {
             Ok(current) => current,
             Err(_) => return Err((failure("native_auth_recovery_required"), Box::new(work))),
         };
-        if current.as_ref().is_some_and(NativeAuthSlot::cached) {
+        if current.as_deref().is_some_and(NativeAuthSlot::cached) {
             current.take();
         }
         if current.is_some() {
@@ -1069,7 +1069,7 @@ impl OwnerRuntimeHandle {
             #[cfg(unix)]
             admission: admission.clone(),
         };
-        *current = Some(NativeAuthSlot {
+        *current = Some(Box::new(NativeAuthSlot {
             token: owner_token(),
             deadline: Instant::now() + operation_bound(&fact),
             fact,
@@ -1089,7 +1089,7 @@ impl OwnerRuntimeHandle {
             committed: false,
             progress: None,
             claude_progress: None,
-        });
+        }));
         assert!(current.as_ref().is_some_and(|slot| {
             slot.dispatch.is_none() && slot.child.is_none() && slot.dispatch_task.is_some()
         }));
@@ -1454,7 +1454,7 @@ impl Authority {
             .native_auth
             .lock()
             .map_err(|_| failure("native_auth_recovery_required"))?;
-        if !preparing && current.as_ref().is_some_and(NativeAuthSlot::cached) {
+        if !preparing && current.as_deref().is_some_and(NativeAuthSlot::cached) {
             current.take();
         }
         if preparing {
@@ -1479,7 +1479,7 @@ impl Authority {
             slot.dispatch = Some(Arc::new(dispatch));
             slot.attached = false;
         } else {
-            *current = Some(NativeAuthSlot {
+            *current = Some(Box::new(NativeAuthSlot {
                 token: token.clone(),
                 fact: dispatch.fact().clone(),
                 admission: dispatch.admission().clone(),
@@ -1497,7 +1497,7 @@ impl Authority {
                 committed: false,
                 progress: None,
                 claude_progress: None,
-            });
+            }));
         }
         assert!(
             current

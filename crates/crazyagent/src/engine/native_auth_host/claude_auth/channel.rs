@@ -254,7 +254,7 @@ impl Authority {
 
     fn claude_input_slot<'a>(
         &self,
-        current: &'a mut Option<NativeAuthSlot>,
+        current: &'a mut Option<Box<NativeAuthSlot>>,
         request: &ClaudeAuthInput,
         fact: &NativeAuthFact,
     ) -> Result<&'a mut ClaudeInputSlot, EngineError> {
