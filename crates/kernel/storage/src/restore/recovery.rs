@@ -10,7 +10,7 @@ use crate::migrations::{
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -226,10 +226,12 @@ pub fn put_back(path: &Path) -> Result<PathBuf, StorageError> {
 
 /// Puts the copy back under the restore lock, with engine.db held alone: the record is read
 /// under the lock, the copy it names passes its check before any write, engine.db is kept as
-/// it is in a new `replaced-<time>` folder, the copy is restored over it on the held
-/// connection and checked against it with `check`, and only then is the record removed.
-/// Inputs: the database path, the check and a step run on the root before the lock.
-/// Output: the folder that keeps the replaced data, or the refusal with the record as it was.
+/// it is in a new `replaced-<time>` folder through the file this process holds open for
+/// good, which must still be the named engine.db once held, the copy is restored over it on
+/// the held connection and checked against it with `check`, and only then is the record
+/// removed; no path closes a descriptor of engine.db. Inputs: the
+/// database path, the check and a step run on the root before the lock. Output: the folder
+/// that keeps the replaced data, or the refusal with the record as it was.
 pub(super) fn put_back_with(
     path: &Path,
     check: CopyCheck,
@@ -239,12 +241,14 @@ pub(super) fn put_back_with(
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
     before_lock(root);
+    let live = crate::held_files::held_file(rustix::fs::CWD, path).map_err(restore_failed)?;
     let (_lock, mut db) = held(path)?;
+    same_file(&live, path)?;
     let name = broken_record(root)
         .and_then(|broken| broken.copy().map(str::to_owned))
         .ok_or_else(|| error(PUTBACK_COPY_MISSING))?;
     let (source, found, rows) = usable(root, &name)?;
-    let saved = keep_live(path, root, SystemTime::now())?;
+    let saved = keep_live(&live, root, SystemTime::now())?;
     restore(&mut db, &source, found, &rows).map_err(|cause| check_failed(cause.0))?;
     check(&db, &source.join(DATABASE)).map_err(|cause| check_failed(cause.0))?;
     clear(root)?;
@@ -252,11 +256,28 @@ pub(super) fn put_back_with(
     Ok(saved)
 }
 
+/// Refuses a live file that is no longer engine.db: the name must still be the same
+/// device and inode as the held file taken before the hold. Inputs: the held file and the
+/// database path. Output: Ok, or `storage_restore_failed`.
+fn same_file(live: &std::fs::File, path: &Path) -> Result<(), StorageError> {
+    let opened = rustix::fs::fstat(live).map_err(restore_failed)?;
+    let named = rustix::fs::statat(rustix::fs::CWD, path, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(restore_failed)?;
+    let regular =
+        rustix::fs::FileType::from_raw_mode(named.st_mode) == rustix::fs::FileType::RegularFile;
+    if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) || !regular {
+        return Err(restore_failed("engine.db was replaced before it was held"));
+    }
+    Ok(())
+}
+
 /// Keeps engine.db's bytes as they are in a new 0700 `replaced-<UTC time>` folder before a
-/// put-back writes, so it can be undone by hand. The copy is not checked, since the data
-/// may fail any check, so it gets no `checked` marker. Inputs: the database path, held
-/// alone, the root and the time. Output: the folder.
-fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, StorageError> {
+/// put-back writes, so it can be undone by hand. The bytes are read by position through
+/// the file this process holds open for good, so no descriptor of engine.db is closed and
+/// no shared file offset moves. The copy is not checked, since the data may fail any check,
+/// so it gets no `checked` marker. Inputs: that file, the root and the time. Output: the
+/// folder.
+fn keep_live(live: &std::fs::File, root: &Path, now: SystemTime) -> Result<PathBuf, StorageError> {
     let taken = stamp(now).map_err(|cause| restore_failed(cause.0))?;
     let target = root.join(BACKUPS).join(format!("{REPLACED}-{taken}"));
     std::fs::DirBuilder::new()
@@ -264,9 +285,28 @@ fn keep_live(path: &Path, root: &Path, now: SystemTime) -> Result<PathBuf, Stora
         .create(&target)
         .map_err(restore_failed)?;
     let copy = target.join(DATABASE);
-    let made = std::fs::copy(path, &copy)
-        .and_then(|_| std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600)))
-        .and_then(|()| std::fs::File::open(&copy)?.sync_all())
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&copy)
+        .and_then(|mut kept| {
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let mut offset = 0_u64;
+            loop {
+                let read = match live.read_at(&mut buffer, offset) {
+                    Ok(read) => read,
+                    Err(cause) if cause.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(cause) => return Err(cause),
+                };
+                if read == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut kept, &buffer[..read])?;
+                offset += read as u64;
+            }
+            kept.sync_all()
+        })
         .and_then(|()| std::fs::File::open(&target)?.sync_all());
     if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
