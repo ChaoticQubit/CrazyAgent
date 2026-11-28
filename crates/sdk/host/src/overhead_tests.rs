@@ -554,7 +554,10 @@ impl sdk::fixture_served::echo::Serve for TimedEcho {
 
 /// Times one served hop: `echo.ping` from a T2 caller through `Bound::serving` to a no-op
 /// `Serve` that makes no lower call, minus a direct `Serve::ping`. The direct call is the
-/// path of a plain function call between two engine modules. Run:
+/// path of a plain function call between two engine modules.
+/// The gateway here uses `AllOn`; the engine's switch check reads its `RwLock` twice per
+/// served call (caller and provider), and that cost is not in these numbers.
+/// Run:
 /// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::served -- --ignored --nocapture`
 /// (`OVERHEAD_MAC=loaded` on the loaded Mac).
 #[test]
@@ -596,6 +599,8 @@ fn served_hop_one_overhead_is_within_budget() {
 /// Times the second hop: inside one served `echo.ping`, the provider's own host calls the
 /// kernel `clock.now` under the provider's id, minus a direct `Provide::now`. No caller is
 /// built outside the gateway: the provider's host is the one the served call hands over.
+/// The gateway here uses `AllOn`; the engine's switch check reads its `RwLock` twice per
+/// served call (caller and provider), and that cost is not in these numbers.
 /// Run: `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::served -- --ignored --nocapture`
 /// (`OVERHEAD_MAC=loaded` on the loaded Mac).
 #[test]
