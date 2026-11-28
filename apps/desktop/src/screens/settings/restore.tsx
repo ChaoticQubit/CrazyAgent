@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getLogCompaction, plainError, saveLogCompaction, type LogCompactionView } from "../../api";
 import { restorePinned, restoreStatus, type RestoreView } from "../../api-restore";
-import { useLoad, type Loaded } from "../../state";
+import { readAfter, readsSoFar, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, Notice, SettingLine, SettingSection, Skeleton, Switch } from "../../ui";
 import "../project/projects.css";
 
@@ -57,22 +57,44 @@ export function CompactionRowView({ compaction, saving, problem, onSwitch }: {
   </SettingSection>;
 }
 
+/** Waits for a submitted save to finish, then hands its result to the page only while the page
+ * is still open; the save always runs to its end. Inputs: the pending save, the page's alive flag
+ * and what the page does with the result. Output: done once the save has ended. */
+export async function settleAfter<T>(pending: Promise<T>, alive: { readonly current: boolean }, settle: (result: T) => void): Promise<void> {
+  const result = await pending;
+  if (alive.current) settle(result);
+}
+
 /** Settings, the compaction row: reads the switch, and on a change saves it once, then reads
- * it again. */
+ * it again. The switch stays held from the click until a read that started after the save
+ * answered lands, so a second click always acts on the engine's choice after that save; a read
+ * already on its way when the save answered never ends the hold. */
 function CompactionRow() {
   const [compaction, reload] = useLoad(getLogCompaction, [], "log-compaction");
   const [saving, setSaving] = useState(false);
+  const [answered, setAnswered] = useState<number | null>(null);
   const [problem, setProblem] = useState("");
+  const refreshing = answered !== null && !readAfter(compaction, answered);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  useEffect(() => {
+    if (answered !== null && !refreshing) setAnswered(null);
+  }, [answered, refreshing]);
   async function save(on: boolean) {
-    if (saving) return;
+    if (saving || refreshing) return;
     setSaving(true);
     setProblem("");
-    const result = await saveLogCompaction(on ? "on" : "off");
-    setSaving(false);
-    if (result.kind === "error") setProblem(result.message);
-    reload();
+    await settleAfter(saveLogCompaction(on ? "on" : "off"), alive, (result) => {
+      setSaving(false);
+      if (result.kind === "error") setProblem(result.message);
+      setAnswered(readsSoFar());
+      reload();
+    });
   }
-  return <CompactionRowView compaction={compaction} saving={saving} problem={problem} onSwitch={(on) => void save(on)} />;
+  return <CompactionRowView compaction={compaction} saving={saving || refreshing} problem={problem} onSwitch={(on) => void save(on)} />;
 }
 
 const RESTORE_TOP = <div className="settings-top"><div>
@@ -125,16 +147,22 @@ export function RestoreSettings() {
   const [asking, setAsking] = useState(false);
   const [sending, setSending] = useState(false);
   const [problem, setProblem] = useState("");
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
   async function confirm() {
     if (sending) return;
     setSending(true);
     setProblem("");
-    const result = await restorePinned();
-    setSending(false);
-    setAsking(false);
-    if (result.kind === "error") setProblem(result.message);
-    if (result.kind === "not_ready") setProblem("Restore 2.4 isn't in this build.");
-    reload();
+    await settleAfter(restorePinned(), alive, (result) => {
+      setSending(false);
+      setAsking(false);
+      if (result.kind === "error") setProblem(result.message);
+      if (result.kind === "not_ready") setProblem("Restore 2.4 isn't in this build.");
+      reload();
+    });
   }
   return <div className="stack">
     <RestoreSettingsView status={status} asking={asking} sending={sending} problem={problem}

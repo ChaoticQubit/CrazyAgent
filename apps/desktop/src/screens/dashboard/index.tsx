@@ -5,7 +5,7 @@ import { loadLearningProgress, setLearningMark, type LearningProgress } from "..
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
-import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
+import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Skeleton, agentsWorking, formatRoute, thisComputer, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
@@ -122,7 +122,7 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
     { id: "pools", icon: "layers", title: "Create a pool", body: "Group up to 15 accounts for your projects to use.",
       action: "Create pool", href: formatRoute({ name: "settings", tab: "pools", action: "new" }), done: poolsDone },
     { id: "harnesses", icon: "terminal", title: "Check your harnesses",
-      body: ready === undefined || harnesses.kind !== "ok" ? "See which coding agents are installed on this Mac." : `${ready} of ${harnesses.value.length} harnesses ready on this Mac.`,
+      body: ready === undefined || harnesses.kind !== "ok" ? `See which coding agents are installed on ${thisComputer()}.` : `${ready} of ${harnesses.value.length} harnesses ready on ${thisComputer()}.`,
       action: "View harnesses", href: formatRoute({ name: "settings", tab: "harnesses" }), done: false },
     { id: "tools", icon: "wrench", title: "Install tools", ...installTools,
       action: "Set up tools", href: formatRoute({ name: "settings", tab: "pack" }) },

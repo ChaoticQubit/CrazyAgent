@@ -711,3 +711,291 @@ fn a_held_folder_turned_into_a_junction_lists_as_unsafe() {
     assert!(root.join("child").join("foreign").is_file());
     assert_eq!(child.list(4).err(), Some(HeldError::Unsafe));
 }
+
+/// The raw system code a plain create-only open or folder make gets at a path already
+/// taken, so a row's failure names the code the layer classified. Inputs: the path and
+/// whether to make a folder. Output: the code, or none when the create succeeds or has none.
+fn raw_create_error(path: &Path, folder: bool) -> Option<i32> {
+    let made = if folder {
+        std::fs::create_dir(path)
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(drop)
+    };
+    made.err().and_then(|error| error.raw_os_error())
+}
+
+/// A private file or folder made where an entry of another kind already is, a folder, a
+/// file or a link, is `Unsafe`, the same refusal as a second make of the same kind, and the
+/// entry stays. A failure names the raw code a plain create there gets.
+#[test]
+fn a_private_make_over_another_kind_of_entry_is_unsafe() {
+    let (_temp, root) = private_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let held = Folder::root(&root).unwrap();
+    drop(held.make_dir(&name("folder")).unwrap());
+    private_file(&root.join("file"), b"kept");
+    link_folder(&root.join("link"), &outside);
+    for taken in ["folder", "link"] {
+        assert_eq!(
+            held.make_file(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}: a create-only file open there fails with {:?}",
+            raw_create_error(&root.join(taken), false)
+        );
+    }
+    for taken in ["file", "link"] {
+        assert_eq!(
+            held.make_dir(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}: a create-only folder there fails with {:?}",
+            raw_create_error(&root.join(taken), true)
+        );
+    }
+    assert!(root.join("folder").is_dir());
+    assert_eq!(std::fs::read(root.join("file")).unwrap(), b"kept");
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+}
+
+/// How many times a row's judge ran, so a row can tell a root refused before its judge
+/// from one its judge refused.
+static JUDGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A judge that passes every folder and counts its runs. Input: the held handle. Output:
+/// true.
+fn judge_passes(_held: &File) -> bool {
+    JUDGED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
+/// A judge that refuses every folder and counts its runs. Input: the held handle. Output:
+/// false.
+fn judge_refuses(_held: &File) -> bool {
+    JUDGED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    false
+}
+
+/// A judge that passes every folder without counting, for rows that run beside the
+/// counting row. Input: the held handle. Output: true.
+fn judge_any(_held: &File) -> bool {
+    true
+}
+
+/// A plain folder a caller judges itself, as an agent home is: made by std, no private list
+/// set on it. Output: the temp guard and the folder's canonical path.
+fn caller_root() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = kernel_sandbox::paths::canonical(temp.path())
+        .unwrap()
+        .join("home");
+    std::fs::create_dir(&root).unwrap();
+    (temp, root)
+}
+
+/// A root held through a caller's judge runs that judge once on the held handle and is
+/// refused as `Unsafe` when the judge says no. Every folder opened through it carries the
+/// caller's judgement. A link at the root's name is `Unsafe` before the judge runs, and the
+/// folder it names is never held.
+#[test]
+fn a_caller_judged_root_runs_its_judge_on_the_held_handle() {
+    use std::sync::atomic::Ordering;
+    let (_temp, root) = caller_root();
+    let before = JUDGED.load(Ordering::SeqCst);
+    let held = Folder::root_judged_by(&root, judge_passes).unwrap();
+    assert_eq!(JUDGED.load(Ordering::SeqCst), before + 1);
+    held.assert_caller_judged();
+    held.make_dir_inherited(&name("child"))
+        .unwrap()
+        .assert_caller_judged();
+    held.open_dir_unjudged(&name("child"))
+        .unwrap()
+        .assert_caller_judged();
+    drop(held);
+    assert_eq!(
+        Folder::root_judged_by(&root, judge_refuses).err(),
+        Some(HeldError::Unsafe)
+    );
+    assert_eq!(JUDGED.load(Ordering::SeqCst), before + 2);
+    let link = root.with_file_name("linked");
+    link_folder(&link, &root);
+    assert_eq!(
+        Folder::root_judged_by(&link, judge_passes).err(),
+        Some(HeldError::Unsafe)
+    );
+    assert_eq!(JUDGED.load(Ordering::SeqCst), before + 2);
+}
+
+/// One call a row runs on a held folder, with the name it reports.
+type Call<'a> = (&'a str, &'a dyn Fn(&Folder));
+
+/// Every call that skips the layer's own judge trips its assertion on a tree held through
+/// `Folder::root`, the private judge, and makes, opens or removes nothing there.
+#[test]
+fn the_unjudged_and_inherited_calls_trip_on_a_private_tree() {
+    let (_temp, root) = private_root();
+    let held = Folder::root(&root).unwrap();
+    drop(held.make_dir(&name("kept")).unwrap());
+    let calls: [Call; 4] = [
+        ("make_dir_inherited", &|folder| {
+            let _ = folder.make_dir_inherited(&name("made"));
+        }),
+        ("make_file_inherited", &|folder| {
+            let _ = folder.make_file_inherited(&name("made"));
+        }),
+        ("open_dir_unjudged", &|folder| {
+            let _ = folder.open_dir_unjudged(&name("kept"));
+        }),
+        ("remove_tree_unjudged", &|folder| {
+            let _ = folder.remove_tree_unjudged(&name("kept"), 1);
+        }),
+    ];
+    for (call, run) in calls {
+        let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&held)));
+        assert!(tripped.is_err(), "{call} ran on a private tree");
+    }
+    assert!(!root.join("made").exists());
+    assert!(root.join("kept").is_dir());
+}
+
+/// An inherited file and folder are create-only, so an entry or a link already at the name
+/// is `Unsafe` and the folder a link names gets nothing. They take the folder's own list on
+/// Windows, so an entry the folder passes on reaches them, where a private file has only the
+/// private list; on Unix they are the user's own, 0600 and 0700.
+#[test]
+fn an_inherited_file_and_folder_are_create_only_and_take_the_folder_s_list() {
+    use std::io::Write;
+    let (_temp, root) = caller_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    link_folder(&root.join("link"), &outside);
+    open_to_everyone(&root);
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    let (mut file, pin) = held.make_file_inherited(&name("settings.json")).unwrap();
+    file.write_all(b"{}").unwrap();
+    assert_ne!(pin.inode, 0);
+    let folder = held.make_dir_inherited(&name("plugin")).unwrap();
+    for taken in ["settings.json", "plugin", "link"] {
+        assert_eq!(
+            held.make_file_inherited(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}: a create-only file open there fails with {:?}",
+            raw_create_error(&root.join(taken), false)
+        );
+        assert_eq!(
+            held.make_dir_inherited(&name(taken)).err(),
+            Some(HeldError::Unsafe),
+            "{taken}: a create-only folder there fails with {:?}",
+            raw_create_error(&root.join(taken), true)
+        );
+    }
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+    assert_eq!(std::fs::read(root.join("settings.json")).unwrap(), b"{}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root.join("settings.json")), 0o600);
+        assert_eq!(mode(&root.join("plugin")), 0o700);
+    }
+    #[cfg(windows)]
+    {
+        use crazyagent_win_sandbox::private;
+        assert!(
+            private::check(&file).is_err(),
+            "the file kept a private list"
+        );
+        assert!(
+            private::check(folder.file()).is_err(),
+            "the folder kept a private list"
+        );
+        let (_private_temp, private_path) = private_root();
+        let private_held = Folder::root(&private_path).unwrap();
+        let (own, _) = private_held.make_file(&name("own")).unwrap();
+        private::check(&own).unwrap();
+    }
+    drop(folder);
+}
+
+/// A tree removal under a caller-judged root takes files, folders and links bottom-up and
+/// never follows a link: a link inside the tree, or at the tree's own name, goes as itself
+/// and every file in the folder it names stays. A missing name is `Missing`.
+#[test]
+fn a_tree_removal_never_follows_a_link_and_keeps_what_it_names() {
+    let (_temp, root) = caller_root();
+    let outside = root.with_file_name("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("kept.txt"), "kept").unwrap();
+    let tree = root.join("skills");
+    std::fs::create_dir_all(tree.join("one").join("two")).unwrap();
+    std::fs::write(tree.join("a.md"), "a").unwrap();
+    std::fs::write(tree.join("one").join("b.md"), "b").unwrap();
+    std::fs::write(tree.join("one").join("two").join("c.md"), "c").unwrap();
+    link_folder(&tree.join("out"), &outside);
+    link_folder(&tree.join("one").join("out"), &outside);
+    link_folder(&root.join("linked"), &outside);
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    held.remove_tree_unjudged(&name("skills"), 3).unwrap();
+    assert!(std::fs::symlink_metadata(&tree).is_err());
+    held.remove_tree_unjudged(&name("linked"), 3).unwrap();
+    assert!(std::fs::symlink_metadata(root.join("linked")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("kept.txt")).unwrap(),
+        "kept"
+    );
+    assert_eq!(
+        held.remove_tree_unjudged(&name("skills"), 3).err(),
+        Some(HeldError::Missing)
+    );
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+}
+
+/// A tree removal is bounded by its depth: folders nested past it are `Full`, and the
+/// deepest file stays, so a tree an agent nests without end never runs the walk on.
+#[test]
+fn a_tree_removal_stops_at_its_depth_bound() {
+    let (_temp, root) = caller_root();
+    let deep = root.join("tree").join("1").join("2").join("3");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("deep.md"), "deep").unwrap();
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    assert_eq!(
+        held.remove_tree_unjudged(&name("tree"), 1).err(),
+        Some(HeldError::Full)
+    );
+    assert_eq!(
+        std::fs::read_to_string(deep.join("deep.md")).unwrap(),
+        "deep"
+    );
+    held.remove_tree_unjudged(&name("tree"), 3).unwrap();
+    assert!(!root.join("tree").exists());
+}
+
+/// On Windows a file in the tree that another handle holds without delete sharing makes
+/// the removal `InUse`, and the file stays until that handle closes, when the same removal
+/// takes the whole tree.
+#[cfg(windows)]
+#[test]
+fn a_tree_removal_with_a_held_file_is_in_use_and_keeps_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_temp, root) = caller_root();
+    std::fs::create_dir_all(root.join("tree").join("sub")).unwrap();
+    std::fs::write(root.join("tree").join("sub").join("busy.md"), "busy").unwrap();
+    let busy = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .open(root.join("tree").join("sub").join("busy.md"))
+        .unwrap();
+    let held = Folder::root_judged_by(&root, judge_any).unwrap();
+    assert_eq!(
+        held.remove_tree_unjudged(&name("tree"), 2).err(),
+        Some(HeldError::InUse)
+    );
+    assert!(root.join("tree").join("sub").join("busy.md").is_file());
+    drop(busy);
+    held.remove_tree_unjudged(&name("tree"), 2).unwrap();
+    assert!(!root.join("tree").exists());
+}

@@ -1100,12 +1100,15 @@ fn check(scenario: &Scenario, write: bool) -> Result<(), String> {
     }
 }
 
-#[test]
-fn every_scenario_matches_its_2_4_2_capture() {
-    let all = scenarios();
+/// Checks the scenarios to run against their goldens, and every golden on disk against the
+/// whole list, the model-server scenarios included. Input: the scenarios to run. Output:
+/// none; panics listing each failure, private text withheld.
+fn check_all(run: &[Scenario]) {
+    let mut all = scenarios();
+    all.extend(provider::server_scenarios());
     assert_eq!(check_names(&all), Ok(()));
     let write = std::env::var_os("SNAPSHOT_V242_WRITE").is_some();
-    let mut failures: Vec<String> = all
+    let mut failures: Vec<String> = run
         .iter()
         .filter_map(|scenario| check(scenario, write).err())
         .collect();
@@ -1119,6 +1122,16 @@ fn every_scenario_matches_its_2_4_2_capture() {
         .map(|line| withheld(line, home.as_deref(), user.as_deref()))
         .collect();
     assert!(printed.is_empty(), "{}", printed.join("\n"));
+}
+
+#[test]
+fn every_scenario_matches_its_2_4_2_capture() {
+    check_all(&scenarios());
+}
+
+#[test]
+fn every_model_server_scenario_matches_its_2_4_2_capture() {
+    check_all(&provider::server_scenarios());
 }
 
 #[test]

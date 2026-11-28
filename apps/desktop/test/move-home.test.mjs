@@ -6,6 +6,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const view = await import("../src/screens/project/move-home.tsx");
+const { moveUnreadLine } = await import("../src/screens/project/move-home-words.ts");
+const unreadLine = moveUnreadLine().replaceAll("'", "&#x27;");
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const ok = (value) => Promise.resolve({ kind: "ok", value });
 const applied = { outcome: "applied", pending: false, rejection: null };
@@ -81,7 +83,7 @@ test("#383 code F1 r2 (leader 16:30, B): a failed folder read makes Move and Cop
   const props = { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "copy", size: failed,
     busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle };
   const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, props));
-  assert.match(page, /CrazyAgent couldn(&#x27;|')t read this folder\. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow\./);
+  assert.ok(page.includes(`>${unreadLine}<`), page);
   assert.doesNotMatch(page, /role="switch"/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: read })), /couldn(&#x27;|')t read this folder/);
 });
@@ -95,7 +97,7 @@ test("V243-MOVE-SIZE-PROBLEM-DESKTOP: a folder read the engine could not finish,
     for (const way of ["move", "copy"]) {
       const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI",
         home: "/Users/o/CrazyAgent", way, size: unfinished, busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle }));
-      assert.match(page, /CrazyAgent couldn(&#x27;|')t read this folder\. Anything in it only in iCloud is downloaded first/, `${code} ${way}`);
+      assert.ok(page.includes(`>${unreadLine}<`), `${code} ${way}`);
       assert.doesNotMatch(page, /role="switch"/, `${code} ${way}`);
     }
   }

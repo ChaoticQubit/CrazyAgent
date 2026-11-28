@@ -50,6 +50,8 @@ pub(in crate::tui) mod team_settings;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
+#[cfg(test)]
+mod computer_words_tests;
 #[cfg(all(test, unix))]
 mod github_rules_tests;
 #[cfg(all(test, unix))]
@@ -188,14 +190,9 @@ impl ProjectTab {
 /// wizard is open or its draft was kept after leaving it.
 pub const DRAFT_LOSS: &str = "Your new project draft will be lost.";
 
-/// What a screen sentence calls the computer CrazyAgent runs on: the Mac on macOS.
-#[cfg(target_os = "macos")]
-const THIS_COMPUTER: &str = "this Mac";
-
-/// What a screen sentence calls the computer CrazyAgent runs on: the computer off macOS,
-/// as the Linux and Windows builds show the same sentences.
-#[cfg(not(target_os = "macos"))]
-const THIS_COMPUTER: &str = "this computer";
+/// What a screen sentence calls the computer CrazyAgent runs on: "this Mac" on macOS, "this
+/// computer" on Linux and Windows, from the same words every joined sentence uses.
+const THIS_COMPUTER: &str = on_this_computer!("", "");
 
 /// A place the owner can go to; the registry builds its screen.
 /// Input: from Go to, Home and Settings. Output: `open` returns its screen.
@@ -515,4 +512,44 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         }
     };
     screen
+}
+
+/// The text render a frame test compares against, for screens whose words name the computer:
+/// on macOS the frame's `<name>.macos.txt` twin when there is one, else `<name>.txt`. Input:
+/// the frame name. Output: the file's path.
+#[cfg(test)]
+pub(in crate::tui) fn frame_path(name: &str) -> String {
+    let base = format!("{}/src/tui/frames/{name}", env!("CARGO_MANIFEST_DIR"));
+    let twin = format!("{base}.macos.txt");
+    if cfg!(target_os = "macos") && std::path::Path::new(&twin).is_file() {
+        twin
+    } else {
+        format!("{base}.txt")
+    }
+}
+
+/// Reads one desktop string literal as the desktop shows it: the text between one matching
+/// pair of double quotes or backticks, with `${thisComputer()}` filled in with this
+/// computer's word. Input: the literal with its quotes. Output: the shown text, or None when
+/// it is not one quoted literal.
+#[cfg(test)]
+pub(in crate::tui) fn desktop_literal(text: &str) -> Option<String> {
+    let quoted = |mark| text.strip_prefix(mark)?.strip_suffix(mark);
+    match (quoted('"'), quoted('`')) {
+        (Some(plain), _) => Some(plain.to_owned()),
+        (None, Some(template)) => Some(template.replace("${thisComputer()}", THIS_COMPUTER)),
+        (None, None) => None,
+    }
+}
+
+/// Reads the text a desktop source file shows for one key of an object literal, from its
+/// `key: literal,` line ([`desktop_literal`]). Inputs: the file's text and the key.
+/// Output: the shown text, or None when no line holds the key with one quoted literal.
+#[cfg(test)]
+pub(in crate::tui) fn desktop_entry(source: &str, key: &str) -> Option<String> {
+    let entry = format!("{key}: ");
+    let text = source
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(entry.as_str()))?;
+    desktop_literal(text.strip_suffix(',')?)
 }

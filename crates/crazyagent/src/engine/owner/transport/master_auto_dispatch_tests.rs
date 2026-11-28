@@ -397,10 +397,7 @@ async fn master_auto_dispatch_closed_actor_reply_still_reconciles_actual_commit(
     let submit = case.submit_request(&session, "auto-lost-reply").await;
     {
         let runtime = case.service.owner_runtime().unwrap();
-        let mut auth = [0; 37];
-        auth[..4].copy_from_slice(b"CAO1");
-        auth[4] = 0;
-        auth[5..].copy_from_slice(&case.owner.token);
+        let auth = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &case.owner.token);
         let admission = runtime.authority.authenticate(&auth).unwrap();
         let _barrier = runtime.engine.owner_egress.write().await;
         let (reply, receive) = oneshot::channel();

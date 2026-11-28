@@ -8,7 +8,7 @@ import "./load-source.mjs";
 
 const client = await import("../src/api-questions.ts");
 const popup = await import("../src/screens/project/question-popup.tsx");
-const state = await import("../src/state.ts");
+const state = await import("../src/questions-shown.ts");
 const page = await import("../src/screens/project/index.tsx");
 
 const NOW = Date.UTC(2026, 10, 11, 13, 0);
@@ -72,6 +72,39 @@ test("the choice is kept in this app and read back, and a missing storage reads 
     assert.doesNotThrow(() => state.saveQuestionsShown("every"));
   } finally {
     delete globalThis.window;
+  }
+});
+
+test("a Questions show choice reaches a reader that already holds one, in this window and from another window, and every reader follows it", () => {
+  const kept = new Map();
+  const heard = [];
+  globalThis.window = {
+    localStorage: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, String(value)), removeItem: (key) => kept.delete(key) },
+    addEventListener: (kind, listener) => heard.push([kind, listener]),
+  };
+  try {
+    let held = state.readQuestionsShown();
+    assert.equal(held, "conversation");
+    const stop = state.onQuestionsShown(() => { held = state.readQuestionsShown(); });
+    state.saveQuestionsShown("every");
+    assert.equal(held, "every", "a save in this window reaches the reader without a new mount");
+    kept.set("crazyagent.questions-shown", "tab");
+    const storageListeners = heard.filter(([kind]) => kind === "storage").map(([, listener]) => listener);
+    assert.equal(storageListeners.length, 1);
+    storageListeners[0]({ key: "crazyagent.terminal-input" });
+    assert.equal(held, "every", "another key's save leaves the choice as it was");
+    storageListeners[0]({ key: "crazyagent.questions-shown" });
+    assert.equal(held, "tab", "a save in another window reaches the reader");
+    stop();
+    state.saveQuestionsShown("conversation");
+    assert.equal(held, "tab", "a stopped reader hears nothing more");
+  } finally {
+    delete globalThis.window;
+  }
+  for (const reader of ["../src/screens/project/index.tsx", "../src/screens/settings/profile.tsx"]) {
+    const source = readFileSync(new URL(reader, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /readQuestionsShown/, `${reader} reads the choice once instead of following it`);
+    assert.match(source, /useQuestionsShown\(\)/, `${reader} follows the choice`);
   }
 });
 
@@ -175,6 +208,23 @@ test("after an answer the keyboard goes to the next card's title, and after the 
   assert.deepEqual(seen.last.seen.answered, [1, 2]);
   assert.equal(seen.last.focus.id, "terminal", "with none left the keyboard returns to where the owner was");
   assert.equal(seen.last.seen.live, "");
+});
+
+test("a question that pops up leaves the keyboard in the terminal the owner is typing in", { timeout: 120_000 }, async () => {
+  const fixture = await bundle(FIXTURE);
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(0)");
+    await evaluate("Fixture.focusTerminal()");
+    await evaluate("Fixture.arrive(1)");
+    const first = { seen: await evaluate("Fixture.seen()"), focus: await evaluate("Fixture.where()") };
+    await evaluate("Fixture.arrive(2)");
+    return { first, second: { seen: await evaluate("Fixture.seen()"), focus: await evaluate("Fixture.where()") } };
+  });
+  assert.equal(seen.first.seen.open, true);
+  assert.equal(seen.first.focus.id, "terminal", "the first question leaves the keyboard where the owner was");
+  assert.equal(seen.second.seen.title, "Question 1 of 2");
+  assert.equal(seen.second.focus.id, "terminal", "a newer question does not take it either");
 });
 
 test("a question answered on the Questions tab is gone from the pop-up as its tab shows again, not up to 5 s later", { timeout: 120_000 }, async () => {

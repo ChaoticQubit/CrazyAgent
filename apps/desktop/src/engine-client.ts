@@ -1,7 +1,7 @@
 import { invoke as native, type InvokeArgs } from "@tauri-apps/api/core";
 import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
-import { isWindows } from "./ui/keys";
+import { isWindows, thisComputer } from "./ui/keys";
 import type { RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
 export type { SkillRole, RoleSkills, TerminalDisplay, TaskStart, HeavyLane, SharedResource, UncommittedReminder } from "./coord-types";
 
@@ -326,7 +326,7 @@ export function errorMessage(error: unknown): string {
     server_not_found: "This MCP server was removed.",
     server_command_invalid: commandPathCopy(isWindows()),
     server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
-    server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
+    server_url_invalid: `Use an https address. Plain http works only for ${thisComputer()}, and the address can't hold a password.`,
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",
     server_secret_duplicate: "Each secret needs its own name.",
@@ -486,7 +486,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "provider_retry" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "fix_tool_permissions" | "refused_tool" | "restore_pinned" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "provider_retry" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "learning_mark" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "install_dependency" | "fix_tool_permissions" | "refused_tool" | "restore_pinned" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "create_demo" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap" | "log_compaction";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;

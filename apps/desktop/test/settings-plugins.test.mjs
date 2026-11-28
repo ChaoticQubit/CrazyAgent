@@ -1,4 +1,4 @@
-import "./load-source.mjs";
+import { eachComputer } from "./load-source.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -273,11 +273,14 @@ test("switches follow the engine: global items in global settings, the per-proje
     { checked: true, label: "On", project: false });
 });
 
-test("the Add MCP server form turns typed text into the engine's spec and refuses what the engine would", () => {
+test("the Add MCP server form turns typed text into the engine's spec and refuses what the engine would", async () => {
   assert.deepEqual(serverSpecInput({ kind: "stdio", command: " /usr/local/bin/uvx ", args: "mcp-server-git\n\n--repository\r\n/Users/owner/code\n", url: "" }),
     { spec: { kind: "stdio", command: "/usr/local/bin/uvx", args: ["mcp-server-git", "--repository", "/Users/owner/code"] } });
   assert.deepEqual(serverSpecInput({ kind: "http", command: "", args: "", url: " https://mcp.example.invalid/sse " }),
     { spec: { kind: "http", url: "https://mcp.example.invalid/sse" } });
+  await eachComputer("../src/screens/settings/plugins.tsx", (form, { os, computer }) =>
+    assert.deepEqual(form.serverSpecInput({ kind: "http", command: "", args: "", url: "http://mcp.example.invalid/sse" }),
+      { error: { url: `Use an https address. Plain http works only for ${computer}, and the address can't hold a password.` } }, os));
   assert.deepEqual(serverSpecInput({ kind: "stdio", command: "uvx", args: "", url: "" }), { error: { command: "Enter the full path to the command, starting with /." } });
   const many = Array.from({ length: 33 }, (_, index) => `arg${index}`).join("\n");
   assert.deepEqual(serverSpecInput({ kind: "stdio", command: "/bin/x", args: many, url: "" }), { error: { args: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together." } });

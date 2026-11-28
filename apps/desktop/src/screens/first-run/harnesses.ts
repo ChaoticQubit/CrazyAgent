@@ -2,6 +2,7 @@ import type { HarnessEntry } from "../../api";
 import type { DependencyState, SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { updateCopy, type HarnessVersions } from "../../api-harness-updates";
+import { thisComputer } from "../../ui/keys";
 
 /** The Harnesses step's place in first run, in the same words as the TUI step: its label in the
  * step list, its heading and its intro. */
@@ -22,9 +23,9 @@ export const OFFERED: readonly { id: string; name: string }[] = [
 /** The words each row and button of the step uses, the same as the TUI step's. */
 export const HARNESS_WORDS = {
   bundled: "Comes with CrazyAgent.",
-  installed: "Already on this Mac.",
+  installed: `Already on ${thisComputer()}.`,
   installsWith: "Installs with",
-  reading: "Reading what's on this Mac.",
+  reading: `Reading what's on ${thisComputer()}.`,
   waiting: "Waiting to install.",
   installing: "Installing now.",
   done: "Installed.",

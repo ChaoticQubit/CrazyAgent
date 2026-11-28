@@ -7,7 +7,7 @@ use kernel_storage::state_log::{
 use rusqlite::{Connection, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use walk::{draft_kinds, has_word, hides_draft, sources};
+use walk::{draft_kinds, has_word, hides_draft, log_scoped, sources};
 
 mod walk;
 
@@ -1241,8 +1241,7 @@ fn no_event_body_can_carry_a_secret() {
     let sources = sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
     let mut writers: Vec<(&str, Vec<Option<String>>)> = Vec::new();
     for (name, code) in &sources {
-        let scoped =
-            name == "state_log.rs" || name.starts_with("state_log/") || has_word(code, "state_log");
+        let scoped = log_scoped(&sources, name);
         let drafts = if scoped {
             draft_kinds(code)
         } else {

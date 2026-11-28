@@ -2,6 +2,7 @@ pub mod permission_fix;
 /// The methods of [`Places`]: how the places are built, which folders they keep and which
 /// paths agents can write.
 mod places;
+pub use places::npm_shims;
 pub mod probe;
 #[cfg(test)]
 pub(crate) mod stub;
@@ -268,6 +269,43 @@ pub const TMUX_MISSING: &str = "tmux is missing, so the live master's terminal c
 pub const TMUX_MISSING: &str =
     "The live master's terminal can't open on this computer. Try again in a moment.";
 
+/// How to install git on macOS, where the Command Line Tools carry it.
+#[cfg(target_os = "macos")]
+const GIT_HINT: &str = "Install git: run xcode-select --install in Terminal.";
+/// How to install git on Linux and the other Unix systems, from the system's packages.
+#[cfg(all(unix, not(target_os = "macos")))]
+const GIT_HINT: &str = "Install git with your package manager.";
+/// How to install git on Windows.
+#[cfg(not(unix))]
+const GIT_HINT: &str = "Install Git for Windows from git-scm.com.";
+
+/// How to install Node.js on macOS, from its site or with Homebrew in Terminal.
+#[cfg(target_os = "macos")]
+pub const NODE_HINT: &str =
+    "Install Node.js from nodejs.org, or run brew install node in Terminal.";
+/// How to install Node.js on Linux and the other Unix systems.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org or with your package manager.";
+/// How to install Node.js on Windows.
+#[cfg(not(unix))]
+pub const NODE_HINT: &str = "Install Node.js from nodejs.org.";
+
+/// How to install Codex on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in Terminal.";
+/// How to install Codex on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+pub const CODEX_HINT: &str = "Install Codex: run npm install -g @openai/codex in a terminal.";
+
+/// How to install Claude Code on macOS, in the Terminal app.
+#[cfg(target_os = "macos")]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal.";
+/// How to install Claude Code on Windows and Linux, in a terminal.
+#[cfg(not(target_os = "macos"))]
+const CLAUDE_HINT: &str =
+    "Install Claude Code: run npm install -g @anthropic-ai/claude-code in a terminal.";
+
 /// The folders the resolver looks in, in order, built once from what the engine knows: no
 /// program is run, no shell file is read and every folder is absolute and bounded. No
 /// folder agents can write is kept ([`Places::agent_writable`]), the engine's data folder
@@ -387,12 +425,13 @@ pub fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
 }
 
 /// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
-/// then its npm harness prefix's `bin` ([`FindingHooks::harness_prefix`]). Input: the engine
-/// root and the hooks. Output: the two folders in that order.
+/// then the folder its npm harness prefix ([`FindingHooks::harness_prefix`]) keeps their
+/// entries in ([`npm_shims`]). Input: the engine root and the hooks. Output: the two folders
+/// in that order.
 fn engine_folders(hooks: &FindingHooks, root: &Path) -> [PathBuf; 2] {
     [
         root.join("setup").join("bin"),
-        (hooks.harness_prefix)(root).join("bin"),
+        npm_shims(&(hooks.harness_prefix)(root)),
     ]
 }
 
@@ -1346,7 +1385,7 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
         ),
         Refusal::Batch => format!(
-            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npm.cmd or npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
         ),
     }
 }
@@ -1355,12 +1394,10 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
 /// sentence.
 fn install_hint(tool: &str) -> &'static str {
     match tool {
-        "node" | "npm" => "Install Node.js from nodejs.org, or run brew install node in Terminal.",
-        "codex" => "Install Codex: run npm install -g @openai/codex in Terminal.",
-        "claude" => {
-            "Install Claude Code: run npm install -g @anthropic-ai/claude-code in Terminal."
-        }
-        "git" => "Install git: run xcode-select --install in Terminal.",
+        "node" | "npm" => NODE_HINT,
+        "codex" => CODEX_HINT,
+        "claude" => CLAUDE_HINT,
+        "git" => GIT_HINT,
         _ => "Install it, or run setup again from Settings.",
     }
 }

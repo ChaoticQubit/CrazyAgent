@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn enter_moves_on_and_choices_toggle_with_arrows() {
-        let mut form = ProfileForm::new(None, Some(Colors::FollowMacos));
+        let mut form = ProfileForm::new(None, Some(Colors::FollowSystem));
         typed(&mut form, "Mira");
         form.key(&Key::Enter);
         typed(&mut form, "Founder");

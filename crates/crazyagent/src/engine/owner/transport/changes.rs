@@ -6,6 +6,7 @@ use crate::landing::{
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const REQUEST_BYTES_MAX: usize =
     1024 + 4 * MESSAGE_BYTES_MAX + DIRTY_FILES_MAX * (DIRTY_PATH_BYTES_MAX + 8);
@@ -431,15 +432,13 @@ impl OwnerClient {
             let mut stream = self
                 .connect_checked(|_| failure("changes_owner_unavailable"))
                 .await?;
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[4] = match self.kind {
-                OwnerClientKind::Tui => 0,
-                OwnerClientKind::Desktop => 1,
-            };
-            packet[5..].copy_from_slice(&self.token);
+            let packet = crate::engine::secret_frame::owner_packet(
+                b"CAO1",
+                crate::engine::secret_frame::client_tag(self.kind),
+                &self.token,
+            );
             stream
-                .write_all(&packet)
+                .write_all(&*packet)
                 .await
                 .map_err(|_| failure("changes_owner_unavailable"))?;
             stream
@@ -727,38 +726,69 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 /// window, each step run on its own so a failing one never skips the
 /// others. Inputs: the authority, held weakly so a server dropped without its stop path
 /// still releases it, and the server's stop, a sender dropped or sent. Runs until the stop
-/// or until the authority is gone; a pass already running ends first, since its blocking
-/// work cannot be cancelled and holds its own connection to the engine database.
+/// or until the authority is gone; a stop ends a running pass's pruning before its next
+/// change set and then waits for the pass, which holds its own engine database connection.
 pub(super) async fn upkeep(authority: std::sync::Weak<Authority>, mut stop: oneshot::Receiver<()>) {
     loop {
         let Some(root) = authority.upgrade().map(|authority| engine_root(&authority)) else {
             return;
         };
+        let stopping = Arc::new(AtomicBool::new(false));
+        let mut stopped = false;
         let failures = match root {
-            Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
-                Ok(db) => [
-                    landing::reconcile(&db).err(),
-                    landing::number_change_sets(&db).err(),
-                    landing::observe(&db, None).err(),
-                    now_ms().and_then(|now| landing::prune(&db, now)).err(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect(),
-                Err(error) => vec![error],
-            })
-            .await
-            .unwrap_or_else(|_| vec![failure("changes_unavailable")]),
+            Ok(root) => {
+                let stop_pass = Arc::clone(&stopping);
+                let mut pass = tokio::task::spawn_blocking(move || match landing::open(&root) {
+                    Ok(db) => [
+                        landing::reconcile(&db).err(),
+                        landing::number_change_sets(&db).err(),
+                        landing::observe(&db, None).err(),
+                        now_ms().and_then(|now| prune(&db, now, &stop_pass)).err(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                    Err(error) => vec![error],
+                });
+                let ended = tokio::select! {
+                    ended = &mut pass => ended,
+                    _ = &mut stop => {
+                        stopping.store(true, Ordering::SeqCst);
+                        stopped = true;
+                        pass.await
+                    }
+                };
+                ended.unwrap_or_else(|_| vec![failure("changes_unavailable")])
+            }
             Err(error) => vec![error],
         };
         for error in failures {
             eprintln!("landing_upkeep_failed cause={}", error.0);
+        }
+        if stopped {
+            return;
         }
         tokio::select! {
             _ = &mut stop => return,
             () = tokio::time::sleep(UPKEEP_EVERY) => {}
         }
     }
+}
+
+/// Prunes the due discarded change sets of one upkeep pass, ending before the next set once
+/// `stop` is set. Inputs: the engine store, the time now and the pass's stop. Output: how
+/// many were deleted.
+#[cfg(unix)]
+fn prune(db: &rusqlite::Connection, now: u64, stop: &AtomicBool) -> Result<usize, EngineError> {
+    landing::prune::prune_until(db, now, stop)
+}
+
+/// Reports pruning unavailable as the landing engine does where it does not run. Inputs:
+/// the engine store, the time now and the pass's stop, unused. Output: the landing
+/// engine's refusal.
+#[cfg(not(unix))]
+fn prune(db: &rusqlite::Connection, now: u64, _stop: &AtomicBool) -> Result<usize, EngineError> {
+    landing::prune(db, now)
 }
 
 fn now_ms() -> Result<u64, EngineError> {
@@ -976,17 +1006,6 @@ mod tests {
         assert!(
             alone.is_ok(),
             "a connection of the stopped engine was left on its database: {alone:?}"
-        );
-        let pruned: i64 = probe
-            .query_row(
-                "SELECT count(*) FROM landing_change_sets WHERE pruned=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            pruned, DISCARDED,
-            "the pass the stop waited for ran to its end"
         );
     }
 
@@ -1438,4 +1457,7 @@ mod tests {
             read.head
         );
     }
+
+    #[cfg(unix)]
+    mod upkeep_stop_tests;
 }

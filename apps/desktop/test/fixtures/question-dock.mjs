@@ -43,6 +43,14 @@ export async function mount(count) {
   await frames();
 }
 
+/** Makes questions wait, as the engine's list does when a master asks while the pop-up is
+ * mounted. Input: how many questions wait now. Output: nothing. */
+export async function arrive(count) {
+  props = { ...props, waiting: Array.from({ length: count }, (_, at) => ask(at + 1, `Question number ${at + 1}?`)) };
+  render();
+  await frames();
+}
+
 /** Switches to another tab and back, as the project page does with the pop-up mounted.
  * Output: nothing. */
 export async function roundTrip() {

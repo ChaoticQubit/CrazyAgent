@@ -417,6 +417,7 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
         let mut client = Stream::from_std(client).unwrap();
         let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
         let admission = admission.clone();
+        let packet = packet.clone();
         let serving = tokio::spawn(async move {
             super::serve(&mut server, &engine, &authority, &packet, &admission, &body).await
         });

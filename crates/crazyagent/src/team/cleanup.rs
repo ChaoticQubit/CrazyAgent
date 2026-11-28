@@ -569,17 +569,10 @@ pub fn finished(
                 (0, true, Some(code.to_owned()))
             }
         };
-        let label = if agent.role == AgentRole::Sub
-            && super::events::name_reaches_running(db, project, agent.id)?
-        {
-            AgentRole::Sub.agent_label(agent.id)
-        } else {
-            agent.label
-        };
         found.push(FinishedAgent {
             id: agent.id,
             role: agent.role,
-            label,
+            label: sweep::listed_label(db, project, &agent)?,
             harness: agent.harness,
             stopped_ms: agent.stopped_ms,
             bytes,
@@ -590,133 +583,6 @@ pub fn finished(
     assert!(removable <= RECLAIMABLE_MAX && kept <= RECLAIMABLE_MAX);
     assert_eq!(found.len(), removable + kept);
     Ok(found)
-}
-
-/// What one pass of the engine's own cleanup did: the agents whose worktree it removed, in
-/// id order, the id the next pass starts after, 0 once this pass read the last finished agent
-/// so agents a check keeps never hold the others back, one line for each agent the engine
-/// could not check or remove, and one for each agent its check let through but its removal
-/// then kept, with the plain code that kept it, at most `CANDIDATES_MAX` lines in all.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Swept {
-    pub removed: Vec<i64>,
-    pub after: i64,
-    pub failures: Vec<String>,
-    pub kept: Vec<String>,
-}
-
-/// Removes, on the engine's own schedule, the worktrees of finished agents in every project
-/// the owner's setting lets go: past its wait since the agent finished, an agent with no
-/// finish time counting as past it, each one checked and removed as Clean up does, one at a
-/// time, so one a check keeps never stops the others. Nothing goes when only the owner's
-/// Clean up removes. A pass reads at most `CANDIDATES_MAX` agents with an id above `after`
-/// and removes at most `RECLAIMABLE_MAX`. Inputs: the store, the engine root, the setting,
-/// where the last pass stopped and the time now. Output: what this pass did.
-pub fn sweep(
-    db: &Connection,
-    runtime: &Path,
-    settings: &CleanupSettings,
-    after: i64,
-    now_ms: i64,
-) -> Result<Swept, EngineError> {
-    assert!(after >= 0);
-    let Some(wait_ms) = settings.wait_ms() else {
-        return Ok(Swept {
-            removed: Vec::new(),
-            after: 0,
-            failures: Vec::new(),
-            kept: Vec::new(),
-        });
-    };
-    let now = landing_time(now_ms)?;
-    let candidates: Vec<(i64, String)> = {
-        let _running = running();
-        initialize(db)?;
-        let mut statement = db
-            .prepare(
-                "SELECT id,project FROM team_agents AS agent WHERE id>?1
-                 AND status IN ('stopped','failed')
-                 AND (stopped_ms IS NULL OR stopped_ms<=?2)
-                 AND (id IN (SELECT agent FROM team_worktrees WHERE project=agent.project)
-                      OR id IN (SELECT agent FROM team_retiring WHERE project=agent.project))
-                 ORDER BY id LIMIT ?3",
-            )
-            .map_err(unavailable)?;
-        statement
-            .query_map(
-                params![after, now_ms.saturating_sub(wait_ms), CANDIDATES_MAX as i64],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(unavailable)?
-            .collect::<Result<_, _>>()
-            .map_err(unavailable)?
-    };
-    let mut swept = Swept {
-        removed: Vec::new(),
-        after: 0,
-        failures: Vec::new(),
-        kept: Vec::new(),
-    };
-    for (id, project) in &candidates {
-        if swept.removed.len() == RECLAIMABLE_MAX {
-            break;
-        }
-        assert!(*id > swept.after);
-        swept.after = *id;
-        if let Err(problem) = sweep_one(db, runtime, project, *id, now, now_ms, &mut swept) {
-            swept.failures.push(format!(
-                "agent={id} cause={}",
-                crate::protocol::plain_code(&problem.0)
-            ));
-        }
-    }
-    if candidates.len() < CANDIDATES_MAX
-        && candidates.last().map(|last| last.0) == Some(swept.after)
-    {
-        swept.after = 0;
-    }
-    assert!(swept.removed.len() <= RECLAIMABLE_MAX);
-    assert!(candidates.len() <= CANDIDATES_MAX);
-    assert!(swept.removed.len() + swept.kept.len() + swept.failures.len() <= candidates.len());
-    Ok(swept)
-}
-
-/// Checks one agent as Clean up would and removes its worktree when nothing keeps it. Inputs:
-/// the store, its project, the agent, the time now in both forms and the pass it adds to:
-/// the agent once removed, or the code its removal kept it with. Output: Ok whether it went
-/// or stayed, or the problem that stopped the check.
-fn sweep_one(
-    db: &Connection,
-    runtime: &Path,
-    project: &str,
-    id: i64,
-    now: u64,
-    now_ms: i64,
-    swept: &mut Swept,
-) -> Result<(), EngineError> {
-    let project = ProjectId::new(project).map_err(unavailable)?;
-    let free = {
-        let _running = running();
-        check(db, &project, id, now)?.is_ok()
-    };
-    if !free {
-        return Ok(());
-    }
-    let removal = remove(db, runtime, &project, &[id], now_ms)?;
-    match removal.kept {
-        None => {
-            assert_eq!(removal.agents, [id]);
-            swept.removed.push(id);
-        }
-        Some(code) => {
-            assert!(removal.agents.is_empty());
-            swept.kept.push(format!(
-                "agent={id} kept={}",
-                crate::protocol::plain_code(&code)
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Removes the worktrees of the owner's chosen finished agents in the order asked: every
@@ -1920,9 +1786,11 @@ fn allocated(metadata: &std::fs::Metadata) -> u64 {
 }
 
 mod acls;
+mod sweep;
 pub(crate) use acls::clear_acls;
 #[cfg(unix)]
 pub(crate) use acls::release_acls;
+pub use sweep::{Swept, sweep};
 
 #[cfg(all(test, unix))]
 mod tests;

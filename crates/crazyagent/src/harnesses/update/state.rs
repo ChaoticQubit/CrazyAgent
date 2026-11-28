@@ -1,11 +1,11 @@
-use super::run::{run_raw, version_raw};
+use super::run::{masked_ran, started, version_raw};
 use super::turn::{Turns, folders, wait_max};
 use super::{
     BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
     InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
     START_FAILED, UNKNOWN_INSTALL, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME,
     check_command, guide, install_command, installed_version, latest, latest_from_pointer, lookup,
-    method, pointer, run, shown, update_command,
+    method, pointer, shown, update_command,
 };
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
@@ -29,6 +29,8 @@ pub const INSTALL_ALREADY: &str = "harness_install_already";
 pub const INSTALL_NOT_FOUND: &str = "harness_install_not_found";
 pub const INSTALL_FAILED: &str = "harness_install_failed";
 pub const INSTALL_LIST_INVALID: &str = "harness_install_list_invalid";
+pub const IN_USE: &str = "harness_update_in_use";
+const UNAVAILABLE: &str = "harness_update_unavailable";
 
 const NO_VERSION: &str = "0";
 const VERSION_ARGS: [&str; 1] = ["--version"];
@@ -106,9 +108,9 @@ impl Roots {
     }
 
     /// The roots of this machine with the given resolver places: the engine's own home
-    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS and no npm yet.
-    /// Input: the places. Output: the roots; an unknown home is an empty home that matches
-    /// nothing.
+    /// ([`home_folder`]), the usual Homebrew prefixes, casks only on macOS, no npm yet and, on
+    /// Windows, the token's elevation, read as elevated when it cannot be read. Input: the
+    /// places. Output: the roots; an unknown home is an empty home that matches nothing.
     fn on(places: kernel_processes::finding::Places) -> Self {
         let home = home_folder().unwrap_or_default();
         Self {
@@ -117,6 +119,8 @@ impl Roots {
             casks: cfg!(target_os = "macos"),
             npm: None,
             places,
+            #[cfg(windows)]
+            elevated: crazyagent_win_sandbox::elevated().unwrap_or(true),
         }
     }
 
@@ -134,7 +138,6 @@ impl Roots {
 /// Finds the npm an npm harness installs with for one engine on the engine's own resolver
 /// places. Inputs: the engine root and those places. Output: the npm, or none with no
 /// usable Node.
-#[cfg(unix)]
 fn engine_npm(
     engine_root: &Path,
     places: &kernel_processes::finding::Places,
@@ -143,34 +146,26 @@ fn engine_npm(
 }
 
 /// Finds the npm an npm harness installs with: the Node setup's one test finds on the places
-/// and the engine prefix, named by its real path when it exists so an install found inside
-/// it matches. Inputs: the engine root and the places. Output: the npm, or none with no
-/// usable Node.
-#[cfg(unix)]
+/// and the engine prefix, named by its real path when it exists (its plain drive spelling on
+/// Windows) so an install found inside it matches, searched where it keeps its entries.
+/// Inputs: the engine root and the places. Output: the npm, or none with no usable Node.
 pub(crate) fn engine_npm_at(
     engine_root: &Path,
     places: &kernel_processes::finding::Places,
 ) -> Option<super::NpmInstall> {
-    let found = crate::setup::node::usable(places)?;
+    let found = crate::setup::node_usable::usable(places)?;
     let named = crate::setup::harness_prefix(engine_root);
+    #[cfg(unix)]
     let prefix = named.canonicalize().unwrap_or(named);
+    #[cfg(not(unix))]
+    let prefix = kernel_sandbox::paths::canonical(&named).unwrap_or(named);
     let node_bin = found.node.parent()?.to_path_buf();
     Some(super::NpmInstall {
         node: found.node,
         program: found.npm,
-        search: vec![node_bin, prefix.join("bin")],
+        search: vec![node_bin, kernel_processes::finding::npm_shims(&prefix)],
         prefix,
     })
-}
-
-/// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
-/// Output: none.
-#[cfg(not(unix))]
-fn engine_npm(
-    _engine_root: &Path,
-    _places: &kernel_processes::finding::Places,
-) -> Option<super::NpmInstall> {
-    None
 }
 
 /// Makes the engine prefix private before an npm install into it, so npm never makes it
@@ -186,8 +181,25 @@ fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
     }
 }
 
+/// Makes the engine prefix and its `node_modules` private folders of this user, with any
+/// missing parent, before an npm install into it, refusing one that exists and is not, with
+/// no `node.exe` put in it: a shim there runs the engine's Node from the places. Inputs: the
+/// install command and the roots. Output: Ok, or `harness_install_failed`.
+#[cfg(windows)]
+fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
+    match (&fixed.prefix, &roots.npm) {
+        (Some(prefix), Some(engine)) if *prefix == engine.prefix => {
+            for folder in [prefix.clone(), prefix.join("node_modules")] {
+                crate::paths::private_folder(&folder).map_err(|_| INSTALL_FAILED)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Makes nothing where npm installs never run. Inputs: unused. Output: Ok.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn ready_prefix(_fixed: &Fixed, _roots: &Roots) -> Result<(), &'static str> {
     Ok(())
 }
@@ -268,7 +280,7 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
         Ok(None) => return Latest::NotChecked,
         Err(code) => return failed(code),
     };
-    match run_raw(&fixed, &roots.home, CHECK_TIME) {
+    match started(&fixed, &roots.places, &roots.home, CHECK_TIME) {
         Ok(raw) => {
             let found = latest(method, &String::from_utf8_lossy(&raw.stdout), installed);
             if !raw.success && matches!(found, Latest::Failed { .. }) {
@@ -332,6 +344,75 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
     }
 }
 
+/// The live sessions a harness may run in: team agents that are starting, idle or working,
+/// and agent runs still running, each read from its table by the harness name it stores.
+const LIVE: [(&str, &str); 2] = [
+    (
+        "team_agents",
+        "SELECT DISTINCT harness FROM team_agents WHERE status IN ('starting','idle','working') LIMIT ?1",
+    ),
+    (
+        "agent_runs",
+        "SELECT DISTINCT harness FROM agent_runs WHERE state='running' LIMIT ?1",
+    ),
+];
+/// The most distinct harness names one table may hold for live sessions; a read past it
+/// refuses, since the name asked about could be the one left out.
+const LIVE_NAMES_MAX: u16 = 256;
+
+/// Tells whether a live session runs a harness ([`LIVE`]), stored under the catalog id or
+/// one of its aliases. A table this database never made holds no session: the Windows engine
+/// keeps no agent runs. Inputs: the engine database and the catalog id. Output: whether one
+/// runs, or `harness_update_unavailable` when a read fails.
+pub(crate) fn in_use(db: &Connection, id: &str) -> Result<bool, &'static str> {
+    assert_eq!(harnesses::canonical(id), id);
+    for (table, query) in LIVE {
+        let made: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|_| UNAVAILABLE)?;
+        if !made {
+            continue;
+        }
+        let mut statement = db.prepare(query).map_err(|_| UNAVAILABLE)?;
+        let names = statement
+            .query_map([LIVE_NAMES_MAX + 1], |row| row.get::<_, String>(0))
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|_| UNAVAILABLE)?;
+        if names.len() > usize::from(LIVE_NAMES_MAX) {
+            return Err(UNAVAILABLE);
+        }
+        if names.iter().any(|name| harnesses::canonical(name) == id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Answers `harness_update_in_use` while a live session runs a harness ([`in_use`]).
+/// Inputs: the engine database and the catalog id. Output: Ok while none runs, else the code.
+fn unused(db: &Connection, id: &str) -> Result<(), &'static str> {
+    if in_use(db, id)? { Err(IN_USE) } else { Ok(()) }
+}
+
+/// Opens the engine database file again, read-only, for a job whose turn came after a wait,
+/// so it reads the sessions that started meanwhile. Input: the path the first read used,
+/// empty for a database held in memory. Output: the connection, or
+/// `harness_update_unavailable` for a path that names no database file.
+fn reopened(path: &str) -> Result<Connection, &'static str> {
+    if path.is_empty() {
+        return Err(UNAVAILABLE);
+    }
+    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| UNAVAILABLE)?;
+    db.busy_timeout(Duration::from_secs(5))
+        .map_err(|_| UNAVAILABLE)?;
+    Ok(db)
+}
+
 /// Turns the end of an update or install run into its record.
 /// Inputs: how the run ended, the code for a tool that failed, and the versions before and
 /// after. Output: the record, with the masked last lines when the tool ran.
@@ -368,7 +449,7 @@ fn updated(
     places: &kernel_processes::finding::Places,
 ) -> LastUpdate {
     let from = version_if_runs(executable, home, places);
-    let ran = run(fixed, home, UPDATE_TIME);
+    let ran = started(fixed, places, home, UPDATE_TIME).map(|raw| masked_ran(raw, home));
     let to = version_if_runs(executable, home, places);
     outcome(ran, UPDATE_FAILED, from, to)
 }
@@ -398,9 +479,9 @@ fn version_gate(executable: &Path, _places: &kernel_processes::finding::Places) 
 /// Lets a harness file be started for its version only when a session would start it, the
 /// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), and only the
 /// system and this user can change the entry as written and the program launch would start
-/// ([`owner_only`]), since [`super::trusted`] refuses every program here and keeps every
-/// update refused. Inputs: the harness file and the resolver's places. Output: Some when it
-/// may start.
+/// ([`owner_only`]). A version read starts the program a launch starts, a script's node
+/// included, so it is gated as launch is. Inputs: the harness file and the resolver's
+/// places. Output: Some when it may start.
 #[cfg(windows)]
 fn version_gate(executable: &Path, places: &kernel_processes::finding::Places) -> Option<()> {
     let launched = crate::harnesses::interactive::launch_tool(executable, places).ok()?;
@@ -497,7 +578,7 @@ fn installed_now(
     after: impl FnOnce() -> Option<PathBuf>,
 ) -> LastUpdate {
     assert!(fixed.args.first() == Some(&"install"));
-    let ran = match run(fixed, home, UPDATE_TIME) {
+    let ran = match started(fixed, places, home, UPDATE_TIME).map(|raw| masked_ran(raw, home)) {
         Ok(ran) if ran.success => ran,
         other => return outcome(other, INSTALL_FAILED, None, None),
     };
@@ -668,9 +749,9 @@ impl Updates {
 
     /// Checks one installed harness for a newer version, by its install method: the
     /// installing tool for Homebrew and npm, the vendor pointer for a self-updating install
-    /// with online lookups on. Where the engine runs no tool ([`run_raw`] refuses, Windows)
-    /// a tool check is not run and reads as not checked, never as a failure. Inputs: the id,
-    /// method, real path, roots, settings and the installed version. Output: the check result.
+    /// with online lookups on, no check with them off. An install whose method is not known
+    /// reads as not checked, never as a failure. Inputs: the id, method, real path, roots,
+    /// settings and the installed version. Output: the check result.
     fn looked(
         &self,
         id: &str,
@@ -680,25 +761,13 @@ impl Updates {
         settings: UpdateSettings,
         installed: &str,
     ) -> Latest {
-        let tools_run = cfg!(unix);
         match method {
-            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. }
-                if tools_run =>
-            {
+            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. } => {
                 tool_check(id, method, real, roots, installed)
             }
-            Method::SelfUpdate if settings.online == OnlineLookup::Off && tools_run => {
-                Latest::NoCheck
-            }
-            Method::SelfUpdate if settings.online != OnlineLookup::Off => {
-                self.pointed(id, method, installed)
-            }
-            Method::Homebrew { .. }
-            | Method::HomebrewFormula { .. }
-            | Method::Npm { .. }
-            | Method::SelfUpdate
-            | Method::WithApp
-            | Method::Unknown => Latest::NotChecked,
+            Method::SelfUpdate if settings.online == OnlineLookup::Off => Latest::NoCheck,
+            Method::SelfUpdate => self.pointed(id, method, installed),
+            Method::WithApp | Method::Unknown => Latest::NotChecked,
         }
     }
 
@@ -836,6 +905,10 @@ impl Updates {
         {
             return Err(super::TOOL_UNSAFE);
         }
+        if cfg!(windows) {
+            unused(db, id)?;
+        }
+        let path = db.path().unwrap_or_default().to_owned();
         let running = self.begin(id)?;
         let real =
             kernel_sandbox::paths::canonical(&executable).unwrap_or_else(|_| executable.clone());
@@ -845,12 +918,19 @@ impl Updates {
         Self::spawn(
             running,
             held,
-            move || match update_command(id, &executable, &real, &roots) {
-                Ok(again) if again == fixed => {
-                    updated(&fixed, &executable, &roots.home, &roots.places)
+            move || {
+                if cfg!(windows)
+                    && let Err(code) = reopened(&path).and_then(|db| unused(&db, id))
+                {
+                    return outcome(Err(code), UPDATE_FAILED, None, None);
                 }
-                Ok(_) => outcome(Err(UNKNOWN_INSTALL), UPDATE_FAILED, None, None),
-                Err(code) => outcome(Err(code), UPDATE_FAILED, None, None),
+                match update_command(id, &executable, &real, &roots) {
+                    Ok(again) if again == fixed => {
+                        updated(&fixed, &executable, &roots.home, &roots.places)
+                    }
+                    Ok(_) => outcome(Err(UNKNOWN_INSTALL), UPDATE_FAILED, None, None),
+                    Err(code) => outcome(Err(code), UPDATE_FAILED, None, None),
+                }
             },
             after,
         )
@@ -1010,12 +1090,12 @@ impl Updates {
 mod windows_tests {
     use super::*;
 
-    /// W1 (leader 01:25, DEC-194): on Windows, where the engine runs no Homebrew or npm and
-    /// no updater, a check of an install those tools made is not run and is no failure, and a
-    /// self-updating install with online lookups off reads as not checked, never as one that
-    /// Update asks to look.
+    /// On Windows a check of an install a tool made runs that tool, as on macOS and Linux, so
+    /// with no npm to run it fails as missing its tool instead of reading as not checked, and
+    /// a self-updating install with online lookups off has no check, never one Update asks
+    /// to look.
     #[test]
-    fn a_windows_install_is_not_checked_by_a_tool_and_never_offers_update_to_look() {
+    fn a_windows_install_is_checked_by_its_tool_as_on_macos_and_linux() {
         let updates = Updates::new();
         let roots = Roots {
             home: PathBuf::from(r"C:\Users\unit"),
@@ -1023,6 +1103,7 @@ mod windows_tests {
             casks: false,
             npm: None,
             places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1040,15 +1121,96 @@ mod windows_tests {
             Method::HomebrewFormula {
                 formula: "opencode".into(),
             },
-            Method::SelfUpdate,
         ] {
             assert_eq!(
                 updates.looked("codex", &method, real, &roots, settings, "0.164.0"),
-                Latest::NotChecked,
+                failed(super::super::TOOL_MISSING),
                 "{method:?}"
             );
         }
+        assert_eq!(
+            updates.looked(
+                "codex",
+                &Method::SelfUpdate,
+                real,
+                &roots,
+                settings,
+                "0.164.0"
+            ),
+            Latest::NoCheck
+        );
     }
+
+    /// On Windows the engine's npm is the `npm.cmd` beside the first `node.exe` the places
+    /// find, with npm's own `npm-cli.js` beside it, and npm installs into the engine prefix,
+    /// named in its plain drive spelling and searched second, where npm puts its shims.
+    #[test]
+    fn a_windows_engine_npm_is_the_npm_beside_the_node_the_places_find() {
+        let node_folder = tempfile::tempdir().unwrap();
+        let node_home = kernel_sandbox::paths::canonical(node_folder.path()).unwrap();
+        let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        std::fs::copy(&curl, node_home.join("node.exe")).unwrap();
+        let cli = node_home.join("node_modules").join("npm").join("bin");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::write(cli.join("npm-cli.js"), "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(node_home.join("npm.cmd"), "@ECHO off\r\n").unwrap();
+        let root_folder = tempfile::tempdir().unwrap();
+        let engine_root = kernel_sandbox::paths::canonical(root_folder.path()).unwrap();
+        let places = crate::tools::tools_new(vec![node_home.clone()], None);
+        let npm = engine_npm(&engine_root, &places).unwrap();
+        let prefix = crate::setup::harness_prefix(&engine_root);
+        assert_eq!(npm.node, node_home.join("node.exe"));
+        assert_eq!(npm.program, node_home.join("npm.cmd"));
+        assert_eq!(npm.search, vec![node_home.clone(), prefix.clone()]);
+        assert_eq!(npm.prefix, prefix);
+        assert!(!npm.prefix.to_str().unwrap().starts_with(r"\\?\"));
+        let empty = crate::tools::tools_new(Vec::new(), None);
+        assert_eq!(engine_npm(&engine_root, &empty), None);
+    }
+
+    /// On Windows an install into the engine prefix first makes the prefix, its missing
+    /// parents and its `node_modules` private folders of this user, and does so again over the
+    /// ones it made; a command for any other prefix makes nothing.
+    #[test]
+    fn a_windows_install_into_the_engine_prefix_makes_it_private_first() {
+        let root_folder = tempfile::tempdir().unwrap();
+        let engine_root = kernel_sandbox::paths::canonical(root_folder.path()).unwrap();
+        let prefix = crate::setup::harness_prefix(&engine_root);
+        let node = PathBuf::from(r"C:\Program Files\nodejs");
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: Some(super::super::NpmInstall {
+                node: node.join("node.exe"),
+                program: node.join("npm.cmd"),
+                search: vec![node.clone(), prefix.clone()],
+                prefix: prefix.clone(),
+            }),
+            places: crate::tools::tools_new(Vec::new(), None),
+            elevated: false,
+        };
+        let other = engine_root.join("other");
+        let fixed = |prefix: &Path| Fixed {
+            program: node.join("npm.cmd"),
+            args: vec!["install"],
+            search: vec![node.clone()],
+            prefix: Some(prefix.to_path_buf()),
+        };
+        assert_eq!(ready_prefix(&fixed(&other), &roots), Ok(()));
+        assert!(!other.exists());
+        assert!(!prefix.exists());
+        for _ in 0..2 {
+            assert_eq!(ready_prefix(&fixed(&prefix), &roots), Ok(()));
+            assert!(crate::paths::is_private_folder(&prefix));
+            assert!(crate::paths::is_private_folder(
+                &prefix.join("node_modules")
+            ));
+        }
+    }
+
     /// V243-W1-VERSION-READ: on Windows the engine's home is the profile folder in its plain
     /// drive spelling, and a program a session would start tells its version through a job
     /// of its own, here the curl Windows ships.
@@ -1140,5 +1302,191 @@ mod windows_tests {
             steps.iter().all(|(entry, _)| *entry != script),
             "the read passed its check before the grant"
         );
+    }
+}
+
+#[cfg(test)]
+mod in_use_tests {
+    use super::*;
+
+    /// Adds the team runtime tables and, when asked, a bare agent runs table to a database,
+    /// with one row per harness name and status. Inputs: the database, the team agents and
+    /// the agent runs. Output: none; a failed write panics.
+    fn fill(db: &Connection, agents: &[(&str, &str)], runs: Option<&[(&str, &str)]>) {
+        crate::team::initialize(db).unwrap();
+        for (harness, status) in agents {
+            db.execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+                 VALUES('p-1','sub_agent',?1,1,?2,1,1)",
+                rusqlite::params![harness, status],
+            )
+            .unwrap();
+        }
+        let Some(runs) = runs else { return };
+        db.execute_batch("CREATE TABLE agent_runs(harness TEXT NOT NULL, state TEXT NOT NULL)")
+            .unwrap();
+        for (harness, state) in runs {
+            db.execute(
+                "INSERT INTO agent_runs(harness,state) VALUES(?1,?2)",
+                rusqlite::params![harness, state],
+            )
+            .unwrap();
+        }
+    }
+
+    /// An in-memory database filled as [`fill`] does. Inputs: the team agents and the agent
+    /// runs. Output: the database.
+    fn live_db(agents: &[(&str, &str)], runs: Option<&[(&str, &str)]>) -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        fill(&db, agents, runs);
+        db
+    }
+
+    /// A team agent of a harness that is starting, idle or working runs it, whether it is
+    /// stored under the catalog id or an alias.
+    #[test]
+    fn a_live_team_agent_of_a_harness_by_its_id_or_an_alias_is_in_use() {
+        for status in ["starting", "idle", "working"] {
+            assert_eq!(
+                in_use(&live_db(&[("codex", status)], None), "codex"),
+                Ok(true)
+            );
+        }
+        let alias = live_db(&[("claude", "working")], None);
+        assert_eq!(in_use(&alias, "claude-code"), Ok(true));
+    }
+
+    /// A team agent that ended, or one of another harness, runs nothing the update replaces.
+    #[test]
+    fn an_ended_team_agent_or_another_harness_is_not_in_use() {
+        let ended = live_db(&[("codex", "stopped"), ("codex", "failed")], None);
+        assert_eq!(in_use(&ended, "codex"), Ok(false));
+        assert_eq!(
+            in_use(&live_db(&[("claude", "working")], None), "codex"),
+            Ok(false)
+        );
+    }
+
+    /// An agent run still running uses its harness; one that closed does not.
+    #[test]
+    fn a_running_agent_run_is_in_use_and_a_closed_one_is_not() {
+        assert_eq!(
+            in_use(&live_db(&[], Some(&[("codex", "running")])), "codex"),
+            Ok(true)
+        );
+        assert_eq!(
+            in_use(&live_db(&[], Some(&[("codex", "closed")])), "codex"),
+            Ok(false)
+        );
+    }
+
+    /// A database that never made the session tables holds no session, so it refuses
+    /// nothing; this is the Windows engine, which keeps no agent runs.
+    #[test]
+    fn a_database_without_the_session_tables_has_nothing_in_use() {
+        assert_eq!(
+            in_use(&Connection::open_in_memory().unwrap(), "codex"),
+            Ok(false)
+        );
+    }
+
+    /// A job whose turn came reads the sessions again from the database file: a live one
+    /// refuses with the in-use code, none lets it go on, and a database with no file to open
+    /// again refuses as unavailable.
+    #[test]
+    fn a_job_reads_the_sessions_again_from_the_database_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("engine.db");
+        let path = file.to_str().unwrap();
+        fill(
+            &Connection::open(&file).unwrap(),
+            &[("codex", "working")],
+            None,
+        );
+        assert_eq!(
+            reopened(path).and_then(|db| unused(&db, "codex")),
+            Err(IN_USE)
+        );
+        assert_eq!(
+            reopened(path).and_then(|db| unused(&db, "claude-code")),
+            Ok(())
+        );
+        assert!(matches!(reopened(""), Err(UNAVAILABLE)));
+        let missing = folder.path().join("missing.db");
+        assert!(matches!(
+            reopened(missing.to_str().unwrap()),
+            Err(UNAVAILABLE)
+        ));
+    }
+
+    /// A database with the update settings, the team runtime tables and Check and update on,
+    /// holding one team agent of a harness in a status. Inputs: the stored harness name and
+    /// the status. Output: the database.
+    fn sessions_db(harness: &str, status: &str) -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let settings = UpdateSettings {
+            mode: UpdateMode::CheckAndUpdate,
+            ..CLOSED
+        };
+        set_settings(&db, settings).unwrap();
+        fill(&db, &[(harness, status)], None);
+        db
+    }
+
+    /// The catalog entry of a harness, found at a file under a fresh folder, and roots with
+    /// no tool. Input: the catalog id. Output: the folder, which holds the file, the entry and
+    /// the roots.
+    fn found_entry(id: &str) -> (tempfile::TempDir, HarnessEntry, Roots) {
+        let folder = tempfile::tempdir().unwrap();
+        let mut entry = harnesses::catalog(&harnesses::Search::new(Vec::new(), None, Vec::new()))
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .unwrap();
+        entry.executable = Some(folder.path().join(format!("{id}.exe")));
+        let roots = Roots {
+            home: folder.path().to_path_buf(),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::tools_new(Vec::new(), None),
+            #[cfg(windows)]
+            elevated: false,
+        };
+        (folder, entry, roots)
+    }
+
+    /// On Windows an update of a harness that a live session runs, named by its catalog id
+    /// or by an alias, is refused before anything starts, since a running harness's image
+    /// cannot be replaced; a session that ended refuses nothing.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_update_of_a_harness_a_live_session_runs_is_refused() {
+        for (id, stored, status) in [
+            ("codex", "codex", "working"),
+            ("codex", "codex", "starting"),
+            ("claude-code", "claude", "idle"),
+        ] {
+            let (_folder, entry, roots) = found_entry(id);
+            let refused =
+                Updates::new().start(&sessions_db(stored, status), &entry, &roots, |_| {});
+            assert_eq!(refused, Err(IN_USE), "{id} {stored} {status}");
+        }
+        let (_folder, entry, roots) = found_entry("codex");
+        let ended = Updates::new().start(&sessions_db("codex", "stopped"), &entry, &roots, |_| {});
+        assert_ne!(ended, Err(IN_USE));
+        let other = Updates::new().start(&sessions_db("claude", "working"), &entry, &roots, |_| {});
+        assert_ne!(other, Err(IN_USE));
+    }
+
+    /// On macOS and Linux a live session refuses no update, as before: the system replaces
+    /// the file under a running harness, and refusing there is the owner's call.
+    #[cfg(not(windows))]
+    #[test]
+    fn an_update_outside_windows_is_not_refused_for_a_live_session() {
+        let (_folder, entry, roots) = found_entry("codex");
+        let started =
+            Updates::new().start(&sessions_db("codex", "working"), &entry, &roots, |_| {});
+        assert_ne!(started, Err(IN_USE));
     }
 }

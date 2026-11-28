@@ -75,8 +75,8 @@ fn record(case: &mut Fixture, kind: ObservationKind, observed_at_ms: u64, valid_
 }
 
 #[tokio::test]
-async fn configured_receipt_admits_one_exact_initial_attempt_without_ready() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_receipt_admits_one_exact_initial_attempt_without_ready() -> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     assert_eq!(counts(&case), (0, 0));
     let before = connection_state(&case.db, &case.proof.connection, 100).unwrap();
     assert_eq!(before.health, Health::Unknown);
@@ -109,22 +109,25 @@ async fn configured_receipt_admits_one_exact_initial_attempt_without_ready() {
         )
         .unwrap()
     );
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_receipt_does_not_relax_ordinary_admission() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_receipt_does_not_relax_ordinary_admission() -> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     let tx = case.db.transaction().unwrap();
     assert!(begin_attempt(&tx, &case.config, &case.config, &case.request, 100).is_err());
     drop(tx);
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_receipt_fields_are_reloaded_instead_of_trusting_constructed_proof() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_receipt_fields_are_reloaded_instead_of_trusting_constructed_proof()
+-> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     let genuine = case.proof.clone();
     for field in 0..13 {
         case.proof = genuine.clone();
@@ -147,12 +150,14 @@ async fn configured_receipt_fields_are_reloaded_instead_of_trusting_constructed_
         reject(&mut case, 100, None);
     }
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_binding_requires_full_connection_current_scope_and_generation() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_binding_requires_full_connection_current_scope_and_generation()
+-> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     let binding = case.binding.clone();
     for field in 0..16 {
         case.binding = binding.clone();
@@ -196,12 +201,14 @@ async fn configured_binding_requires_full_connection_current_scope_and_generatio
     }
     case.generation = case.proof.generation;
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_initial_scope_excludes_workers_tools_retry_and_foreign_tasks() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_initial_scope_excludes_workers_tools_retry_and_foreign_tasks()
+-> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     let request = case.request.clone();
     for field in 0..6 {
         case.request = request.clone();
@@ -221,12 +228,14 @@ async fn configured_initial_scope_excludes_workers_tools_retry_and_foreign_tasks
         reject(&mut case, 100, None);
     }
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_initial_shared_eligibility_preserves_strict_quota_for_real_unknown_state() {
-    let case = configured_initial_conversation_fixture().await;
+async fn configured_initial_shared_eligibility_preserves_strict_quota_for_real_unknown_state()
+-> Result<(), String> {
+    let case = configured_initial_conversation_fixture().await?;
     let state = connection_state(&case.db, &case.proof.connection, 100).unwrap();
     assert_eq!(state.health, Health::Unknown);
     assert_eq!(state.quota, Quota::Unknown);
@@ -242,11 +251,13 @@ async fn configured_initial_shared_eligibility_preserves_strict_quota_for_real_u
         "gateway_quota_unknown"
     );
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_initial_preserves_explicit_negative_and_stale_observations() {
+async fn configured_initial_preserves_explicit_negative_and_stale_observations()
+-> Result<(), String> {
     for (kind, observed, until, now, expected) in [
         (
             ObservationKind::InvalidAuthentication,
@@ -288,17 +299,19 @@ async fn configured_initial_preserves_explicit_negative_and_stale_observations()
             "gateway_initial_readiness_stale",
         ),
     ] {
-        let mut case = configured_initial_conversation_fixture().await;
+        let mut case = configured_initial_conversation_fixture().await?;
         record(&mut case, kind, observed, until);
         reject(&mut case, now, Some(expected));
         assert_eq!(counts(&case), (0, 1));
-        case.close().await;
+        case.close().await?;
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_initial_cannot_start_a_second_attempt_or_retry_after_local_completion() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_initial_cannot_start_a_second_attempt_or_retry_after_local_completion()
+-> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     let first = begin(&mut case, 100).unwrap();
     let tx = case.db.transaction().unwrap();
     finish_attempt_without_observation(
@@ -318,22 +331,25 @@ async fn configured_initial_cannot_start_a_second_attempt_or_retry_after_local_c
     case.request.previous_attempt = Some(first.attempt.request.id);
     reject(&mut case, 102, None);
     assert_eq!(counts(&case), (1, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_receipt_is_revalidated_before_same_id_replay() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_receipt_is_revalidated_before_same_id_replay() -> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     begin(&mut case, 100).unwrap();
     case.proof.registration_id = RequestId::new("unregistered-replay-receipt").unwrap();
     reject(&mut case, 101, None);
     assert_eq!(counts(&case), (1, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_initial_requires_exact_current_config_and_full_connection() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_initial_requires_exact_current_config_and_full_connection() -> Result<(), String>
+{
+    let mut case = configured_initial_conversation_fixture().await?;
     let mut current = case.config.clone();
     current.id = ConfigId::new("0".repeat(64)).unwrap();
     assert!(begin_with_current(&mut case, &current, 100).is_err());
@@ -343,13 +359,15 @@ async fn configured_initial_requires_exact_current_config_and_full_connection() 
         .id = "changed-live-model".into();
     assert!(begin_with_current(&mut case, &current, 100).is_err());
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_gateway_revalidates_actual_source_and_physical_profile_identity() {
+async fn configured_gateway_revalidates_actual_source_and_physical_profile_identity()
+-> Result<(), String> {
     for replace_profile in [false, true] {
-        let mut case = configured_initial_conversation_fixture().await;
+        let mut case = configured_initial_conversation_fixture().await?;
         if replace_profile {
             let config = case.profile_home.join(".backboard/config.json");
             let bytes = std::fs::read(&config).unwrap();
@@ -363,8 +381,9 @@ async fn configured_gateway_revalidates_actual_source_and_physical_profile_ident
         }
         reject(&mut case, 100, None);
         assert_eq!(counts(&case), (0, 0));
-        case.close().await;
+        case.close().await?;
     }
+    Ok(())
 }
 
 /// Moves the database pin of the fixture's one configured master registration, as a
@@ -384,21 +403,24 @@ fn move_registered_database(case: &Fixture, device: i64, inode: i64) {
 }
 
 #[tokio::test]
-async fn configured_master_registration_survives_a_database_renumber() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_master_registration_survives_a_database_renumber() -> Result<(), String> {
+    let mut case = configured_initial_conversation_fixture().await?;
     move_registered_database(&case, 1, 0);
     let first = begin(&mut case, 100).unwrap();
     assert!(!first.replayed);
     assert_eq!(first.attempt.connection, case.proof.connection);
     assert_eq!(counts(&case), (1, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn configured_master_registration_on_another_database_inode_is_refused() {
-    let mut case = configured_initial_conversation_fixture().await;
+async fn configured_master_registration_on_another_database_inode_is_refused() -> Result<(), String>
+{
+    let mut case = configured_initial_conversation_fixture().await?;
     move_registered_database(&case, 1, 1);
     reject(&mut case, 100, Some("master_configured_database_changed"));
     assert_eq!(counts(&case), (0, 0));
-    case.close().await;
+    case.close().await?;
+    Ok(())
 }

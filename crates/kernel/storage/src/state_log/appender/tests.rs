@@ -183,3 +183,32 @@ fn a_name_the_engine_check_refuses_is_refused_by_an_append_and_a_snapshot() {
     assert_eq!(written(&tx), before);
     assert_eq!(log.append(&draft(AggregateName::new("ide"))).unwrap(), 2);
 }
+
+/// A statement on the shared transaction that moves the `state` revision between two
+/// appends makes the next append refuse as stale and write nothing, so no event is logged
+/// at a revision the store has left.
+#[test]
+fn an_append_after_the_state_revision_moved_is_refused_as_stale() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::owner(&tx, 4, passing(), any).unwrap();
+    let draft = Draft {
+        aggregate: AggregateName::new("ide"),
+        kind: "Tick",
+        schema: 1,
+        at_ms: 1,
+        body: b"{}",
+    };
+    assert_eq!(log.append(&draft).unwrap(), 2);
+    tx.execute("UPDATE state SET revision=revision+1 WHERE id=1", [])
+        .unwrap();
+    let before = written(&tx);
+
+    let appended = log.append(&draft);
+
+    assert_eq!(
+        appended.err(),
+        Some(StorageError("state_log_revision_stale".into()))
+    );
+    assert_eq!(written(&tx), before);
+}

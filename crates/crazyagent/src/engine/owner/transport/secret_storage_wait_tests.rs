@@ -62,9 +62,7 @@ impl Busy {
     }
 
     fn admission(&self) -> crate::engine::owner::Admission {
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&self.client.token);
+        let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.client.token);
         self.service
             .owner_runtime()
             .unwrap()

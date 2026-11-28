@@ -1,5 +1,25 @@
 #![forbid(unsafe_code)]
 
+/// Joins two sentence pieces around the words for the computer CrazyAgent runs on, "this Mac"
+/// on macOS, so the sentence stays one literal. Inputs: the literal text before and after the
+/// words. Output: the joined literal.
+#[cfg(target_os = "macos")]
+macro_rules! on_this_computer {
+    ($before:literal, $after:literal) => {
+        concat!($before, "this Mac", $after)
+    };
+}
+
+/// Joins two sentence pieces around the words for the computer CrazyAgent runs on, "this
+/// computer" on Windows and Linux, so the sentence stays one literal. Inputs: the literal text
+/// before and after the words. Output: the joined literal.
+#[cfg(not(target_os = "macos"))]
+macro_rules! on_this_computer {
+    ($before:literal, $after:literal) => {
+        concat!($before, "this computer", $after)
+    };
+}
+
 pub mod accounts;
 pub mod activity;
 pub mod adapters;
@@ -18,7 +38,6 @@ pub mod coordination;
 pub mod credentials;
 pub mod demo;
 pub mod engine;
-pub mod file_identity;
 #[cfg(unix)]
 pub mod file_lock;
 pub mod github;

@@ -234,9 +234,7 @@ impl ChannelCase {
 
     fn admission(&self) -> Admission {
         let client = self.client(OwnerClientKind::Tui);
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAO1");
-        packet[5..].copy_from_slice(&client.token);
+        let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &client.token);
         self.host.authority.authenticate(&packet).unwrap()
     }
 
@@ -297,7 +295,7 @@ impl ChannelCase {
         (fact, launch)
     }
 
-    fn token(&self) -> [u8; 32] {
+    fn token(&self) -> crate::engine::secret_frame::OwnerToken {
         self.host
             .authority
             .native_auth
@@ -306,13 +304,11 @@ impl ChannelCase {
             .as_ref()
             .unwrap()
             .token
+            .clone()
     }
 
-    fn packet(&self) -> [u8; 37] {
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAN1");
-        packet[5..].copy_from_slice(&self.token());
-        packet
+    fn packet(&self) -> crate::engine::secret_frame::OwnerPacket {
+        crate::engine::secret_frame::owner_packet(b"CAN1", 0, &self.token())
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -588,7 +584,7 @@ async fn native_auth_channel_rejects_owner_runner_and_reserved_capability_roles(
                     } else {
                         OwnerClientKind::Desktop
                     };
-                    packet[5..].copy_from_slice(&case.client(kind).token);
+                    packet[5..].copy_from_slice(&*case.client(kind).token);
                 }
                 "as-tui" | "as-desktop" => {
                     packet[..4].copy_from_slice(b"CAO1");

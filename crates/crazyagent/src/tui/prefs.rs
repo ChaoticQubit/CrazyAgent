@@ -6,6 +6,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const PREFS_BYTES_MAX: u64 = 64;
+const LEGACY_FOLLOW_WORD: &str = "follow-macos";
 
 /// Where the TUI keeps its Colors choice on this computer.
 /// Input: the home folder. Output: `~/Library/Application Support/CrazyAgent/tui-colors`
@@ -49,7 +50,7 @@ fn unix_path(home: &Path, xdg_config: Option<&std::ffi::OsStr>) -> PathBuf {
 
 fn word(colors: Colors) -> &'static str {
     match colors {
-        Colors::FollowMacos => "follow-macos",
+        Colors::FollowSystem => "follow-system",
         Colors::Dark => "dark",
         Colors::Light => "light",
         Colors::Terminal => "terminal",
@@ -57,10 +58,14 @@ fn word(colors: Colors) -> &'static str {
 }
 
 /// Reads the saved Colors choice.
-/// Input: the file path. Output: the choice; Follow macOS when the file is
+/// Input: the file path. Output: the choice; `follow-macos`, the word older builds
+/// saved, reads as the follow choice, which is also the answer when the file is
 /// missing, too large or unreadable.
 pub fn load_colors(path: &Path) -> Colors {
     let text = read_word(path).unwrap_or_default();
+    if text == LEGACY_FOLLOW_WORD {
+        return Colors::FollowSystem;
+    }
     Colors::ALL
         .iter()
         .map(|(choice, _)| *choice)
@@ -220,18 +225,31 @@ mod tests {
     }
 
     #[test]
+    fn the_follow_choice_is_saved_as_follow_system_and_the_old_word_still_reads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let folder = tempfile::tempdir()?;
+        let path = folder.path().join("tui-colors");
+        save_colors(&path, Colors::default())?;
+        assert_eq!(std::fs::read_to_string(&path)?, "follow-system");
+        assert_eq!(load_colors(&path), Colors::default());
+        std::fs::write(&path, "follow-macos")?;
+        assert_eq!(load_colors(&path), Colors::default());
+        Ok(())
+    }
+
+    #[test]
     fn colors_round_trip_and_bad_files_fall_back() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("nested").join("tui-colors");
-        assert_eq!(load_colors(&path), Colors::FollowMacos);
+        assert_eq!(load_colors(&path), Colors::FollowSystem);
         for (choice, _) in Colors::ALL {
             save_colors(&path, choice).unwrap();
             assert_eq!(load_colors(&path), choice);
         }
         std::fs::write(&path, "purple").unwrap();
-        assert_eq!(load_colors(&path), Colors::FollowMacos);
+        assert_eq!(load_colors(&path), Colors::FollowSystem);
         std::fs::write(&path, "x".repeat(100)).unwrap();
-        assert_eq!(load_colors(&path), Colors::FollowMacos);
+        assert_eq!(load_colors(&path), Colors::FollowSystem);
         #[cfg(target_os = "macos")]
         assert_eq!(
             default_path(Some("/Users/mira")).unwrap(),

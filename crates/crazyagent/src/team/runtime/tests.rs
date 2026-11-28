@@ -179,7 +179,7 @@ impl Fixture {
         ))
     }
 
-    fn runtime(&self) -> TeamRuntime {
+    pub(super) fn runtime(&self) -> TeamRuntime {
         let access = self.access.clone();
         TeamRuntime::open(
             &self.base.join("engine.db"),
@@ -33816,7 +33816,7 @@ fn granted_policy(
 /// A worker between turns that holds no toolchain and the saved network, so only what an
 /// F08 row changes widens or narrows it, with the receiver of its orders. Input: the
 /// project and the role. Output: the worker and its orders.
-fn held_worker(project: &ProjectId, role: AgentRole) -> (Worker, Receiver<Order>) {
+pub(super) fn held_worker(project: &ProjectId, role: AgentRole) -> (Worker, Receiver<Order>) {
     let mut worker = between_turns(project, role, true, false);
     let (order, orders) = channel();
     worker.orders = order;
@@ -34510,48 +34510,6 @@ fn run_time_row(choice: Option<u32>) {
     team.shutdown().unwrap();
 }
 
-/// 7 days, the default before the owner picks (F01).
-#[cfg(target_os = "macos")]
-#[test]
-fn an_unset_run_time_stops_the_live_master_after_seven_days_without_the_owner() {
-    run_time_row(None);
-}
-
-/// 1 day (F01).
-#[cfg(target_os = "macos")]
-#[test]
-fn a_one_day_run_time_stops_the_live_master_after_a_day_without_the_owner() {
-    run_time_row(Some(86_400));
-}
-
-/// 3 days (F01).
-#[cfg(target_os = "macos")]
-#[test]
-fn a_three_day_run_time_stops_the_live_master_after_three_days_without_the_owner() {
-    run_time_row(Some(259_200));
-}
-
-/// 7 days picked by the owner (F01).
-#[cfg(target_os = "macos")]
-#[test]
-fn a_seven_day_run_time_stops_the_live_master_after_seven_days_without_the_owner() {
-    run_time_row(Some(604_800));
-}
-
-/// 14 days (F01).
-#[cfg(target_os = "macos")]
-#[test]
-fn a_fourteen_day_run_time_stops_the_live_master_after_fourteen_days_without_the_owner() {
-    run_time_row(Some(1_209_600));
-}
-
-/// 30 days (F01).
-#[cfg(target_os = "macos")]
-#[test]
-fn a_thirty_day_run_time_stops_the_live_master_after_thirty_days_without_the_owner() {
-    run_time_row(Some(2_592_000));
-}
-
 /// No limit keeps a live master with work in flight running a year without the owner and
 /// shows no time left (F01).
 #[cfg(target_os = "macos")]
@@ -35028,5 +34986,8 @@ fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_net
 #[path = "launch_home_hooks_tests.rs"]
 mod launch_home_hooks_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "tests/run_time.rs"]
+mod run_time;
 #[path = "tests/status_log.rs"]
 mod status_log;

@@ -1,6 +1,7 @@
 import type { WebglAddon } from "@xterm/addon-webgl";
 import type { IFunctionIdentifier, IParser, Terminal } from "@xterm/xterm";
 import type { TerminalMessage } from "../../engine-client";
+import { isMac, isWindows } from "../../ui/keys";
 
 export const INPUT_BYTES_MAX = 4096;
 export const SIZE_MIN = 2;
@@ -405,9 +406,18 @@ const END_COPY: Record<string, string> = {
   exited: "The agent's app exited.",
 };
 
-/** Plain words for why a terminal view ended. Input: the engine's plain code. Output: one
- * sentence; unknown codes get a generic one. */
-export function endCopy(code: string): string {
+/** The sentence for a terminal with no tmux on Linux, where setup installs tmux only through
+ * Linux Homebrew or when the engine already runs as root and never calls sudo, so the owner's
+ * package manager comes first. */
+const LINUX_NO_TMUX = "Terminals need tmux, and it isn't ready on this computer. Install tmux with your package manager, then run setup again from Settings.";
+
+/** Plain words for why a terminal view ended. Inputs: the engine's plain code, whether this is
+ * Linux, by default when the window is neither macOS nor Windows, and whether this is Windows,
+ * where terminals need no tmux and the code means the engine couldn't open the terminal.
+ * Output: one sentence; unknown codes get a generic one. */
+export function endCopy(code: string, linux: boolean = !isMac() && !isWindows(), windows: boolean = isWindows()): string {
+  if (linux && code === "terminal_unavailable") return LINUX_NO_TMUX;
+  if (windows && code === "terminal_unavailable") return END_COPY.terminal_attach_failed;
   return END_COPY[code] ?? "This terminal closed.";
 }
 

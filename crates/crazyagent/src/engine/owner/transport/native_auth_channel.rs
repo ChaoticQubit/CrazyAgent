@@ -86,7 +86,7 @@ fn fact_host(fact: &NativeAuthFact) -> HostStamp {
 }
 
 pub(super) struct NativeAuthSlot {
-    pub(super) token: [u8; 32],
+    pub(super) token: OwnerToken,
     fact: NativeAuthFact,
     admission: Admission,
     dispatch: Option<Arc<NativeAuthDispatch>>,
@@ -472,7 +472,7 @@ impl NativeAuthSlot {
 
 #[cfg(unix)]
 pub(crate) struct NativeAuthCustodyLaunch {
-    token: [u8; 32],
+    token: OwnerToken,
     authority: Weak<Authority>,
     delivered: bool,
 }
@@ -485,7 +485,7 @@ impl NativeAuthCustodyLaunch {
     ) -> Result<(), EngineError> {
         use std::io::Write;
         self.delivered = true;
-        input.write_all(&self.token).map_err(io_error)?;
+        input.write_all(&*self.token).map_err(io_error)?;
         drop(input);
         Ok(())
     }
@@ -499,12 +499,11 @@ impl Drop for NativeAuthCustodyLaunch {
             && let Ok(mut slot) = authority.native_auth.lock()
             && let Some(slot) = slot.as_mut()
             && !slot.attached
-            && bool::from(slot.token.ct_eq(&self.token))
+            && bool::from(slot.token.ct_eq(&*self.token))
         {
             slot.attached = true;
             slot.live.store(false, Ordering::SeqCst);
         }
-        kernel_security::secret::wipe(&mut self.token);
     }
 }
 
@@ -1071,7 +1070,7 @@ impl OwnerRuntimeHandle {
             admission: admission.clone(),
         };
         *current = Some(NativeAuthSlot {
-            token: [0; 32],
+            token: owner_token(),
             deadline: Instant::now() + operation_bound(&fact),
             fact,
             admission,
@@ -1436,9 +1435,9 @@ impl Authority {
             .ok_or_else(|| failure("owner_grant_stale_or_revoked"))?;
         let file = slot.held()?;
         self.root.verify_key(KEYS[index], file, slot.identity)?;
-        let mut actual = [0; 32];
-        file.read_exact_at(&mut actual, 0).map_err(io_error)?;
-        if !bool::from(slot.token.ct_eq(&actual)) || self.root.socket_identity()? != self.socket {
+        let mut actual = owner_token();
+        file.read_exact_at(&mut *actual, 0).map_err(io_error)?;
+        if !bool::from(slot.token.ct_eq(&*actual)) || self.root.socket_identity()? != self.socket {
             return Err(failure("owner_capability_content_changed"));
         }
         Ok(())
@@ -1473,15 +1472,15 @@ impl Authority {
         } else if current.is_some() {
             return Err(failure("native_auth_host_busy"));
         }
-        let mut token = [0; 32];
-        getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
+        let mut token = owner_token();
+        getrandom::fill(&mut *token).map_err(|_| failure("owner_entropy_unavailable"))?;
         if let Some(slot) = current.as_mut() {
-            slot.token = token;
+            slot.token = token.clone();
             slot.dispatch = Some(Arc::new(dispatch));
             slot.attached = false;
         } else {
             *current = Some(NativeAuthSlot {
-                token,
+                token: token.clone(),
                 fact: dispatch.fact().clone(),
                 admission: dispatch.admission().clone(),
                 deadline: Instant::now() + operation_bound(dispatch.fact()),
@@ -1911,7 +1910,7 @@ impl Drop for Session {
 
 pub(super) async fn serve(
     mut stream: Stream,
-    packet: [u8; 37],
+    packet: crate::engine::secret_frame::OwnerPacket,
     engine: Arc<Engine>,
     authority: Weak<Authority>,
     timeout: Duration,
@@ -2345,7 +2344,7 @@ pub(crate) struct NativeAuthCustodyChannel {
 
 #[cfg(unix)]
 impl NativeAuthCustodyChannel {
-    pub(crate) async fn connect(input: &Path, token: [u8; 32]) -> Result<Self, EngineError> {
+    pub(crate) async fn connect(input: &Path, token: OwnerToken) -> Result<Self, EngineError> {
         let entered = Instant::now();
         tokio::time::timeout(READ_BOUND, Self::connect_pinned(input, token, entered))
             .await
@@ -2354,7 +2353,7 @@ impl NativeAuthCustodyChannel {
 
     async fn connect_pinned(
         input: &Path,
-        mut token: [u8; 32],
+        token: OwnerToken,
         entered: Instant,
     ) -> Result<Self, EngineError> {
         let (generation, host, binding) = runner_binding(input)?;
@@ -2368,12 +2367,9 @@ impl NativeAuthCustodyChannel {
         if root.socket_identity()? != socket {
             return Err(failure("owner_socket_replaced"));
         }
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(b"CAN1");
-        packet[5..].copy_from_slice(&token);
-        kernel_security::secret::wipe(&mut token);
-        stream.write_all(&packet).await.map_err(io_error)?;
-        kernel_security::secret::wipe(&mut packet);
+        let packet = crate::engine::secret_frame::owner_packet(b"CAN1", 0, &token);
+        drop(token);
+        stream.write_all(&*packet).await.map_err(io_error)?;
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,
@@ -2953,9 +2949,7 @@ fallback_allowed = false
             action: NativeAuthAction,
         ) -> Self {
             let host = service.owner_runtime().unwrap();
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[5..].copy_from_slice(&client.token);
+            let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &client.token);
             let admission = host.authority.authenticate(&packet).unwrap();
             let command = match action {
                 NativeAuthAction::SignIn { method } => Command::Start(NativeAuthStart {
@@ -3004,7 +2998,8 @@ fallback_allowed = false
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .token;
+                .token
+                .clone();
             let channel = NativeAuthCustodyChannel::connect(root.path(), token)
                 .await
                 .unwrap();
@@ -3551,9 +3546,7 @@ fallback_allowed = false
                 operation: OwnerOperation::Apply { mutation },
             };
             request.validate().unwrap();
-            let mut packet = [0; 37];
-            packet[..4].copy_from_slice(b"CAO1");
-            packet[5..].copy_from_slice(&self.client.token);
+            let packet = crate::engine::secret_frame::owner_packet(b"CAO1", 0, &self.client.token);
             let admission = host.authority.authenticate(&packet).unwrap();
             let operation = host
                 .engine

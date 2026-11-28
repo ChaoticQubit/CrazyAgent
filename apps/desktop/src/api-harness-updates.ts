@@ -1,4 +1,5 @@
 import { call, knownError, type Result } from "./api";
+import { thisComputer } from "./ui/keys";
 
 export type UpdateMethod = { kind: "self_update" } | { kind: "homebrew"; cask: string } | { kind: "homebrew_formula"; formula: string } | { kind: "npm"; package: string } | { kind: "with_app" } | { kind: "unknown" };
 export type LatestVersion = { kind: "not_checked" } | { kind: "no_check" } | { kind: "up_to_date" } | { kind: "newer"; version: string } | { kind: "failed"; code: string };
@@ -22,14 +23,15 @@ export const UPDATE_SETTINGS_DEFAULT: UpdateSettings = { mode: "check_and_update
 const COPY: Record<string, string> = {
   harness_update_unknown_install: "CrazyAgent can't tell how this was installed, so it won't update it.",
   harness_update_with_app: "Comes with CrazyAgent and updates with it.",
-  harness_update_tool_missing: "The tool that updates it is no longer on this Mac.",
+  harness_update_tool_missing: `The tool that updates it is no longer on ${thisComputer()}.`,
   harness_update_tool_unsafe: "The tool that updates it can be changed by another user, so CrazyAgent won't run it.",
   harness_update_needs_admin: "Updating it needs an administrator. Update it yourself.",
   harness_update_as_root: "CrazyAgent is running as the root user, so it won't run an update.",
   harness_update_off: "Harness updates are off in settings.",
   harness_update_check_only: "Harness updates are set to Check only.",
   harness_update_busy: "This harness is already updating or installing.",
-  harness_update_not_installed: "It isn't installed on this Mac.",
+  harness_update_in_use: "Close the sessions that use it, then update.",
+  harness_update_not_installed: `It isn't installed on ${thisComputer()}.`,
   harness_update_timeout: "The update took too long and was stopped.",
   harness_update_failed: "The update didn't finish.",
   harness_update_unsupported_here: "CrazyAgent can't update it on this computer.",
@@ -43,10 +45,10 @@ const COPY: Record<string, string> = {
   harness_update_unavailable: "The engine couldn't open its update records. Try again.",
   harness_install_no_tool: "CrazyAgent installs with Homebrew or npm and found no way to install this one.",
   harness_install_off: "Install from the app is off in settings.",
-  harness_install_already: "It's already installed on this Mac.",
+  harness_install_already: `It's already installed on ${thisComputer()}.`,
   harness_install_not_found: "The install finished, but CrazyAgent can't find the harness. Choose Check again.",
   harness_install_failed: "The install didn't finish.",
-  harness_install_needs_node: "CrazyAgent installs this one with npm, and Node.js isn't on this Mac yet.",
+  harness_install_needs_node: `CrazyAgent installs this one with npm, and Node.js isn't on ${thisComputer()} yet.`,
   harness_install_list_invalid: "CrazyAgent couldn't install that list of harnesses. Pick them again.",
 };
 

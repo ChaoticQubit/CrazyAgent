@@ -1,7 +1,8 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
 import { failureCopy } from "./api-projects";
-import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
-import type { GitHubPromptAnswer } from "./engine-client";
+import { permissionRefusal } from "./api-intake-words";
+import { isMac, signInStore, thisComputer } from "./ui/keys";
+import { githubPublishPrompt, githubPublishPromptSet, type GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
   githubUseCli, intakeDismiss, intakeStart, intakeStatus, intakeStop, reinstallDismiss, reinstallOffer, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
@@ -74,7 +75,6 @@ const COPY: Record<string, string> = {
   home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
-  home_permission_denied: "macOS didn't let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed.",
   icloud_download_busy: "Too many iCloud downloads are running at once. Wait for one to finish.",
   icloud_folder_missing: "That folder isn't there anymore. Choose it again.",
   icloud_folder_unsafe: "That folder can't be downloaded.",
@@ -125,8 +125,8 @@ const COPY: Record<string, string> = {
   github_config_invalid: "CrazyAgent's GitHub settings file can't be read safely. Sign in again.",
   github_state_invalid: "The saved GitHub sign-in can't be read. Sign in again.",
   github_state_unavailable: "The saved GitHub sign-in can't be read. Sign in again.",
-  credential_missing: "The saved GitHub sign-in is gone from your keychain. Sign in again.",
-  credential_store_unavailable: "Your system keychain can't be used right now.",
+  credential_missing: `The saved GitHub sign-in is gone from ${isMac() ? "your keychain" : signInStore()}. Sign in again.`,
+  credential_store_unavailable: `${isMac() ? "Your system keychain" : signInStore().replace(/^y/, "Y")} can't be used right now.`,
   github_repo_name_invalid: "That repository name isn't valid. Pick it from the list.",
   github_repo_name_unsupported: "CrazyAgent can't clone a repository whose name starts with a dot or dash, ends in .git or uses characters other than letters, digits, dots, dashes and underscores.",
   github_repo_page_invalid: "That page of repositories doesn't exist.",
@@ -231,9 +231,9 @@ const COPY: Record<string, string> = {
 export const ADD_WARNINGS = {
   close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
   old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
-  across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
+  across_disks: `This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If ${thisComputer()} sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.`,
   same_disk: "This is a rename on the same disk; it is quick.",
-  copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
+  copy_all: `This copies every file into your projects folder. It can take a long time and needs as much free space again. If ${thisComputer()} sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.`,
   large: "This folder is very large.",
   unmeasured: "CrazyAgent couldn't measure it.",
   too_many: "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time.",
@@ -267,8 +267,9 @@ const MOVE_COPY: Record<string, string> = {
  * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
  * the project move copy, then the project and app copy, then the fallback naming the code; a
  * different cause is named after. */
-export function intakeCopy(failure: string | { code: string; cause?: string }): string {
+export function intakeCopy(failure: string | { code: string; cause?: string }, mac?: boolean): string {
   const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
+  if (code === "home_permission_denied") return namedFailure(permissionRefusal(mac), code, cause);
   if (Object.hasOwn(COPY, code)) return namedFailure(COPY[code], code, cause);
   return Object.hasOwn(MOVE_COPY, code) ? namedFailure(MOVE_COPY[code], code, cause) : failureCopy({ code, cause });
 }
