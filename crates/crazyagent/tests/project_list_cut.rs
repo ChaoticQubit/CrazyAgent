@@ -15,6 +15,12 @@ const LIST_MAX: usize = 200;
 /// The page size the desktop list reads, the bridge's `PAGE_SIZE`.
 const PAGE_SIZE: u8 = 16;
 
+/// The most projects the engine holds: every mutation refuses a store past it with
+/// `state_capacity`, so no create can reach the desktop list's own cut.
+const STORE_MAX: usize = 128;
+
+const _: () = assert!(STORE_MAX < LIST_MAX && STORE_MAX.is_multiple_of(PAGE_SIZE as usize));
+
 /// Creates one project with no repositories through the engine's wire socket. Inputs: the
 /// engine folder and the project id. Output: nothing, or the engine error.
 async fn add_project(root: &Path, id: &str) -> Result<(), crazyagent::engine::EngineError> {
@@ -54,14 +60,16 @@ async fn add_project(root: &Path, id: &str) -> Result<(), crazyagent::engine::En
 
 /// Reads the project list page by page as the desktop bridge's `project_list` does: pages
 /// of 16 until 200 are held or no page follows, at most 201 reads, then cut to 200. Input:
-/// the controller. Output: the kept ids and whether the engine holds more.
+/// the controller. Output: the kept ids, whether the engine holds more and the page reads.
 async fn project_list(
     controller: &mut OwnerController,
-) -> Result<(Vec<String>, bool), crazyagent::engine::EngineError> {
+) -> Result<(Vec<String>, bool, usize), crazyagent::engine::EngineError> {
     let mut ids = Vec::new();
     let mut cursor = None;
     let mut more = true;
+    let mut reads = 0;
     for _ in 0..=LIST_MAX {
+        reads += 1;
         let state = controller
             .read_page(OwnerView::Projects, cursor.take(), Some(PAGE_SIZE))
             .await?;
@@ -85,12 +93,12 @@ async fn project_list(
     }
     more = more || ids.len() > LIST_MAX;
     ids.truncate(LIST_MAX);
-    Ok((ids, more))
+    Ok((ids, more, reads))
 }
 
 /// Seeds projects `p000` up to the count on a fresh engine and reads the desktop list.
-/// Input: how many projects. Output: the kept ids and whether more follow.
-async fn listed(count: usize) -> (Vec<String>, bool) {
+/// Input: how many projects. Output: the kept ids, whether more follow and the page reads.
+async fn listed(count: usize) -> (Vec<String>, bool, usize) {
     let root = tempfile::Builder::new()
         .prefix("ca-list-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -119,15 +127,13 @@ async fn listed(count: usize) -> (Vec<String>, bool) {
     observed.unwrap()
 }
 
-/// The desktop list over the projects plugin keeps the first 200 projects in id order and
-/// says more follow when 201 exist, and keeps all 200 with none following when 200 exist.
+/// The desktop list over the projects plugin pages a full store, the engine's cap of 128
+/// projects, in id order: eight pages of 16, every project once, and none following.
 #[tokio::test]
-async fn project_list_cuts_at_200_like_2_4_4() {
-    let expected: Vec<String> = (0..LIST_MAX).map(|n| format!("p{n:03}")).collect();
-    let (ids, more) = listed(LIST_MAX + 1).await;
-    assert_eq!(ids, expected);
-    assert!(more);
-    let (ids, more) = listed(LIST_MAX).await;
+async fn project_list_pages_the_full_store_in_id_order() {
+    let expected: Vec<String> = (0..STORE_MAX).map(|n| format!("p{n:03}")).collect();
+    let (ids, more, reads) = listed(STORE_MAX).await;
     assert_eq!(ids, expected);
     assert!(!more);
+    assert_eq!(reads, STORE_MAX / usize::from(PAGE_SIZE));
 }
