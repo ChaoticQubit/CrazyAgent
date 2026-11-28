@@ -329,14 +329,25 @@ pub(crate) fn walks() -> usize {
 /// run before it refuses the path.
 const DANGLING_LINK_HOPS: usize = 16;
 
-/// The reads one walk of a list takes, kept by exact path, so a folder several walks of that
-/// list pass through, such as the owner home above most secrets, is read once. It is built
+/// The reads one walk of a list takes, kept by exact path, so a folder several walks pass
+/// through is read once; entry reads, links not followed, sit in their own map. It is built
 /// and dropped inside one [`Walked::of`] or one extension or re-walk of a [`Kept`] list, so
 /// no read outlives the moment its answer is used, and only a read that succeeded is kept.
 #[derive(Default)]
 struct Reads {
     identities: std::collections::HashMap<PathBuf, Option<Identity>>,
     canonical: std::collections::HashMap<PathBuf, PathBuf>,
+    #[cfg(unix)]
+    entries: std::collections::HashMap<PathBuf, Option<Entry>>,
+}
+
+/// One entry as read with links not followed: a link, or another entry with its identity,
+/// which then equals the identity read following links.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    Link,
+    Plain(Identity),
 }
 
 impl Reads {
@@ -349,6 +360,24 @@ impl Reads {
         }
         let found = identity(path)?;
         self.identities.insert(path.to_path_buf(), found);
+        Ok(found)
+    }
+
+    /// The entry a path names, links not followed, read once per path. Input: the path.
+    /// Output: the entry, None when it does not exist, or the I/O error, which is not kept.
+    #[cfg(unix)]
+    fn entry(&mut self, path: &Path) -> io::Result<Option<Entry>> {
+        use std::os::unix::fs::MetadataExt;
+        if let Some(found) = self.entries.get(path) {
+            return Ok(*found);
+        }
+        let found = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => Some(Entry::Link),
+            Ok(meta) => Some(Entry::Plain((meta.dev(), meta.ino()))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        self.entries.insert(path.to_path_buf(), found);
         Ok(found)
     }
 
@@ -403,8 +432,42 @@ impl Walk {
     /// None when the path is not one this read can answer, or `Invalid` with
     /// [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
     #[cfg(unix)]
-    fn read_fast(_path: &Path, _reads: &mut Reads) -> Result<Option<Walk>, SandboxError> {
-        Ok(None)
+    fn read_fast(path: &Path, reads: &mut Reads) -> Result<Option<Walk>, SandboxError> {
+        let refused = |_| invalid(SECRET_ROOT_REFUSED);
+        let parts: Vec<Component<'_>> = path.components().collect();
+        if parts.first() != Some(&Component::RootDir) {
+            return Ok(None);
+        }
+        let mut ids = Vec::with_capacity(parts.len());
+        let mut run = PathBuf::new();
+        let mut gone = false;
+        for part in &parts {
+            if !matches!(part, Component::RootDir | Component::Normal(_)) {
+                return Ok(None);
+            }
+            run.push(part);
+            let found = if gone {
+                None
+            } else {
+                match reads.entry(&run).map_err(refused)? {
+                    Some(Entry::Link) => return Ok(None),
+                    Some(Entry::Plain(id)) => Some(id),
+                    None => {
+                        gone = true;
+                        None
+                    }
+                }
+            };
+            ids.push(found);
+        }
+        let reached: Vec<Identity> = ids.iter().rev().flatten().copied().collect();
+        assert_eq!(ids.len(), parts.len());
+        assert!(!reached.is_empty() && reached.len() <= ids.len());
+        Ok(Some(Walk {
+            path: path.to_path_buf(),
+            ids,
+            reached,
+        }))
     }
 
     /// Reads the identities of a path's leading runs, of every folder above the deepest
