@@ -469,17 +469,30 @@ fn capgen_provider_crate() {
     }
 }
 
+/// The engine's served wiring equals what capgen writes from the prod caps and plugins:
+/// with no served stem no file is written and the folder is absent or empty; with one, the
+/// folder holds exactly the generated `served.rs`.
 #[test]
-fn the_prod_folders_write_no_served_file() {
+fn the_engine_served_wiring_equals_capgen_output() {
     let loaded = caps();
     let files = served_wiring(&borrowed(&loaded), &repo("plugins")).expect("the wiring generates");
-    assert_eq!(files, Vec::<(String, String)>::new());
     let folder = repo("crates/crazyagent/src/generated_served");
-    assert!(
-        !folder.exists() || drift(&folder, &files).is_empty(),
-        "{}",
-        folder.display()
-    );
+    if files.is_empty() {
+        assert!(
+            !folder.exists() || drift(&folder, &files).is_empty(),
+            "{}",
+            folder.display()
+        );
+    } else {
+        assert_eq!(
+            files
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            ["served.rs"]
+        );
+        assert_eq!(drift(&folder, &files), Vec::<String>::new());
+    }
 }
 
 /// Every stem a bundled grant serves has exactly one field in the generated wiring, taken
