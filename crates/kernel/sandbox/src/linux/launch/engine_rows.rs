@@ -1309,3 +1309,46 @@ fn no_agent_is_granted_the_git_state_the_owners_git_reads_and_runs() {
 }
 
 mod helper_paths;
+
+/// The Landlock rules of a guarded launch grant no write in any engine record folder: no
+/// written or git-written folder sits at, in or above one, so even a Unix socket the socket
+/// filter let through could not be made there.
+#[test]
+fn a_guarded_launch_grants_no_write_in_any_engine_record_folder() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let [project, home, tmp, runtime] =
+        ["project", "home", "tmp", "runtime"].map(|name| root.join(name));
+    for folder in [&project, &home, &tmp, &runtime] {
+        fs::create_dir(folder).unwrap();
+    }
+    fs::write(runtime.join("engine.db"), "engine secret\n").unwrap();
+    let kinds = crate::test_hooks::STAND_IN.plain_record_folders;
+    assert!(!kinds.is_empty());
+    for kind in kinds {
+        fs::create_dir(runtime.join(kind)).unwrap();
+    }
+    let sandbox = ProjectSandbox::new(
+        &crate::test_hooks::STAND_IN,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap()
+    .guard_engine(&runtime)
+    .unwrap();
+    let grants = Grants::of(&sandbox).unwrap();
+    assert!(!grants.write.is_empty());
+    for kind in kinds {
+        let folder = runtime.join(kind);
+        for written in grants.write.iter().chain(&grants.git_write) {
+            assert!(
+                !written.starts_with(&folder) && !folder.starts_with(written),
+                "{} reaches {}",
+                written.display(),
+                folder.display()
+            );
+        }
+    }
+}
