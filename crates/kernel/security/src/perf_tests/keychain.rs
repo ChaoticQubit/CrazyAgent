@@ -7,6 +7,7 @@ use std::hint::black_box;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const FAST: usize = 1000;
 const FILES: usize = 10;
@@ -110,6 +111,42 @@ impl Drop for Scratch {
     }
 }
 
+/// Runs one bare `security -h`, which reads no keychain, the way the store runs `security`:
+/// the spawn gate, a reader thread on its output of at most 4096 bytes and a `try_wait` poll
+/// every 10 ms, so its row times the spawn, reader and poll alone. Panics when the child
+/// fails, or kills and reaps it and joins the reader, then panics, when it outlives its
+/// 10 s deadline.
+fn security_spawn() {
+    let mut command = Command::new(SECURITY);
+    command
+        .arg("-h")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || crate::read_limited::read_limited(stdout, 4096));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let (read, bytes) = reader.join().unwrap();
+    let status = status.expect("security -h outlived its deadline");
+    assert!(status.success() && read.is_ok(), "security -h failed");
+    black_box(bytes);
+}
+
 /// Times the macOS keychain calls that touch only a scratch keychain in a temporary home
 /// under `/tmp/ca-keychain-*`, so its path is as long as the twin build's: the name checks,
 /// the store opened at that keychain and in that home, its writes, reads and deletes, and
@@ -137,6 +174,7 @@ fn keychain_calls() {
     );
     assert!(agent_keychain_name(AGENT_KEYCHAIN) && owned_namespace(NAMESPACE).is_ok());
     forget_record(&agent.home, &agent.path, SERVICE).unwrap();
+    security_spawn();
     time(&row("keychain.agent_keychain_name", FAST), SAMPLES, || {
         black_box(agent_keychain_name(black_box(AGENT_KEYCHAIN)));
     });
@@ -149,6 +187,11 @@ fn keychain_calls() {
     time(&row("store.macos.Keychain.path", FAST), SAMPLES, || {
         black_box(black_box(&store).path());
     });
+    time(
+        &row("store.macos.security_spawn", ONE),
+        SAMPLES,
+        security_spawn,
+    );
     time(&row("store.macos.Keychain.in_home", ONE), SAMPLES, || {
         black_box(Keychain::in_home(NAMESPACE, black_box(&home)).unwrap());
     });
