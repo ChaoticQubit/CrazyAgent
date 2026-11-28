@@ -314,11 +314,11 @@ fn identity(path: &Path) -> io::Result<Option<Identity>> {
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
-    /// How many walks [`Walk::of`] took on this thread, which rows read through [`walks`].
+    /// How many walks [`Walk::read`] took on this thread, which rows read through [`walks`].
     static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The number of walks [`Walk::of`] took on this thread so far, read by the macOS profile
+/// The number of walks [`Walk::read`] took on this thread so far, read by the macOS profile
 /// rows. Takes nothing. Returns the count.
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) fn walks() -> usize {
@@ -344,11 +344,12 @@ pub(crate) fn entry_reads() -> usize {
 /// run before it refuses the path.
 const DANGLING_LINK_HOPS: usize = 16;
 
-/// The reads one walk of a list takes, kept by exact path, so a folder several walks pass
-/// through is read once; entry reads, links not followed, sit in their own map. It is built
-/// and dropped inside one [`Walked::of`] or one extension or re-walk of a [`Kept`] list, so
-/// no read outlives the moment its answer is used, and only a read that succeeded is kept.
-#[derive(Default)]
+/// The reads one sandbox build takes, kept by exact path for the whole build, so a folder
+/// its walks pass through, such as the owner home above most secrets, is read once per
+/// build; entry reads, links not followed, sit in their own map. A path that changes during
+/// the build is judged as first read until the install, whose [`Kept::recheck`] reads
+/// everything again with reads of its own. Only a read that succeeded is kept.
+#[derive(Debug, Default)]
 struct Reads {
     identities: std::collections::HashMap<PathBuf, Option<Identity>>,
     canonical: std::collections::HashMap<PathBuf, PathBuf>,
@@ -363,6 +364,14 @@ struct Reads {
 enum Entry {
     Link,
     Plain(Identity),
+}
+
+impl Clone for Reads {
+    /// Starts a copy with no reads, so a copied build reads the disk again rather than
+    /// carry answers it did not read. Output: empty reads.
+    fn clone(&self) -> Self {
+        Reads::default()
+    }
 }
 
 impl Reads {
@@ -425,12 +434,6 @@ struct Walk {
 }
 
 impl Walk {
-    /// Walks a path with reads of its own, as [`Walk::read`] does. Input: the path. Output:
-    /// the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`].
-    fn of(path: &Path) -> Result<Walk, SandboxError> {
-        Self::read(path, &mut Reads::default())
-    }
-
     /// Walks a path through `reads`: by [`Walk::read_fast`] when it answers, else by
     /// [`Walk::read_full`], which gives the same walk for every path. Inputs: the path and
     /// the reads of its list. Output: the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`].
@@ -681,6 +684,7 @@ pub(crate) struct Walked {
     owner: Walk,
     harnesses: Vec<Walk>,
     secrets: Vec<Walk>,
+    reads: Reads,
 }
 
 impl Walked {
@@ -704,17 +708,19 @@ impl Walked {
                 .iter()
                 .map(|secret| Walk::read(secret, &mut reads))
                 .collect::<Result<_, _>>()?,
+            reads,
         };
         assert_eq!(walked.harnesses.len(), harnesses.len());
         assert_eq!(walked.secrets.len(), secrets.len());
         Ok(walked)
     }
 
-    /// Walks a root once and refuses it when it holds or sits in one of this list's secrets,
-    /// the first rule an extra read-only folder is judged by. Input: the root. Output: its
-    /// walk for [`Walked::grant_walked`], or `Invalid` with [`SECRET_ROOT_REFUSED`].
-    pub(crate) fn walk_clear(&self, root: &Path) -> Result<WalkedRoot, SandboxError> {
-        let walk = Walk::of(root)?;
+    /// Walks a root once, through this list's reads, and refuses it when it holds or sits in
+    /// one of this list's secrets, the first rule an extra read-only folder is judged by.
+    /// Input: the root. Output: its walk for [`Walked::grant_walked`], or `Invalid` with
+    /// [`SECRET_ROOT_REFUSED`].
+    pub(crate) fn walk_clear(&mut self, root: &Path) -> Result<WalkedRoot, SandboxError> {
+        let walk = Walk::read(root, &mut self.reads)?;
         clear_of_walked(&walk, &self.secrets)?;
         Ok(WalkedRoot(walk))
     }
@@ -896,13 +902,13 @@ impl Kept {
         Ok(())
     }
 
-    /// Walks each of `secrets` this list does not hold yet, sharing their reads, and adds
-    /// them. Input: the secret paths. Output: unit, or `Invalid` with [`SECRET_ROOT_REFUSED`].
+    /// Walks each of `secrets` this list does not hold yet, through the build's reads, and
+    /// adds them. Input: the secret paths. Output: unit, or `Invalid` with
+    /// [`SECRET_ROOT_REFUSED`].
     fn walk_secrets(&mut self, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-        let mut reads = Reads::default();
         for secret in secrets {
             if !self.walked.secrets.iter().any(|walk| walk.path == *secret) {
-                let walk = Walk::read(secret, &mut reads)?;
+                let walk = Walk::read(secret, &mut self.walked.reads)?;
                 self.walked.secrets.push(walk);
             }
         }
@@ -916,16 +922,17 @@ impl Kept {
         Ok(())
     }
 
-    /// The walk of a path this build checked already, else a new walk of it. Input: the
-    /// path. Output: the walk, or `Invalid` with [`SECRET_ROOT_REFUSED`].
-    fn walk_of(&self, path: &Path) -> Result<Walk, SandboxError> {
+    /// The walk of a path this build checked already, else a new walk of it through the
+    /// build's reads. Input: the path. Output: the walk, or `Invalid` with
+    /// [`SECRET_ROOT_REFUSED`].
+    fn walk_of(&mut self, path: &Path) -> Result<Walk, SandboxError> {
         match self
             .checked
             .iter()
             .find(|checked| checked.walk.path == path)
         {
             Some(checked) => Ok(checked.walk.clone()),
-            None => Walk::of(path),
+            None => Walk::read(path, &mut self.walked.reads),
         }
     }
 

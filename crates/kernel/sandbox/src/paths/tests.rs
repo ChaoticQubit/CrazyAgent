@@ -763,7 +763,7 @@ fn a_link_to_a_secret_walks_as_the_full_read_and_reaches_the_secret() {
     std::os::unix::fs::symlink(&secret, root.join("alias")).unwrap();
     assert!(!walks_as_full(&root.join("alias")));
     let walk = Walk::read(&root.join("alias"), &mut Reads::default()).unwrap();
-    let secret_id = Walk::of(&secret)
+    let secret_id = Walk::read(&secret, &mut Reads::default())
         .unwrap()
         .ids
         .last()

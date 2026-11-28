@@ -52,7 +52,7 @@ fn checked_in(
             .map_err(|_| "read_path_credentials")?;
         *walks = Some((owner, walked));
     }
-    let (_, walked) = walks.as_ref().ok_or("read_path_credentials")?;
+    let (_, walked) = walks.as_mut().ok_or("read_path_credentials")?;
     let root = walked
         .walk_clear(&real)
         .map_err(|_| "read_path_credentials")?;
