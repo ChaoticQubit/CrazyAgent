@@ -13,8 +13,8 @@ use crate::migrations::{BACKUPS, DATABASE, backup, check_copy};
 use crate::perf_kit::{SAMPLES, time};
 use crate::restore::recovery::{Recovery, continue_2_5, finish, put_back, recovery};
 use crate::restore::{
-    Hooks, RECORD_FAILED, RECORD_RESTORING, RESTORE_RECORD_FILE, RESTORE_ROLLBACK_FAILED,
-    read_restore_record, restore_pinned, write_restore_record,
+    Hooks, RECORD_FAILED, RECORD_RESTORING, RESTORE_ROLLBACK_FAILED, read_restore_record,
+    restore_pinned, write_restore_record,
 };
 use crate::upgrade::{Step, check, upgrade};
 
@@ -283,6 +283,6 @@ fn storage_sized_database_calls() {
             nanos(started)
         },
     );
-    assert!(!root.join(RESTORE_RECORD_FILE).exists());
+    assert_eq!(read_restore_record(&root), None);
     assert!(template_path.is_file());
 }

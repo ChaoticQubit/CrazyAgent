@@ -8,9 +8,7 @@ use crate::migrations::{
     BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS, CHECKED, backup_failure, backups_in, pinned, stamp,
 };
 use crate::perf_kit::{SAMPLES, time};
-use crate::restore::{
-    RESTORE_RECORD_FILE, read_restore_record, restorable_until, write_restore_record,
-};
+use crate::restore::{read_restore_record, restorable_until, write_restore_record};
 
 const READ_BATCH: usize = 10;
 const WRITE_BATCH: usize = 1;
@@ -51,7 +49,7 @@ pub(crate) fn engine_root(temp: &Path) -> PathBuf {
     private_folder(&pinned);
     private_text(&pinned.join(CHECKED), b"");
     private_text(&root.join(BACKUP_FAILURE_FILE), BACKUP_FAILED.as_bytes());
-    private_text(&root.join(RESTORE_RECORD_FILE), RECORD.as_bytes());
+    write_restore_record(&root, RECORD).expect("record");
     root
 }
 
