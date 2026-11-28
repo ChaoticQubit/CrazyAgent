@@ -718,14 +718,19 @@ fn a_build_walks_each_secret_once_for_its_three_roots() {
 }
 
 /// No agent can make a Unix socket in any engine record folder, which the engine therefore
-/// never searches for sockets: inside the guarded sandbox each bind there fails and leaves no
-/// socket, while the same script run outside the sandbox binds in each folder, so the row sees
-/// a bind when one happens.
+/// never searches for sockets: inside the guarded sandbox each bind there fails with the
+/// sandbox's denial (EPERM or EACCES, never a path error) and leaves no socket, while the same
+/// bind run outside the sandbox succeeds in each folder, so the row sees a bind when one
+/// happens. Every socket path stays under the 104-byte limit of a Unix socket address.
 #[test]
 fn an_agent_cannot_bind_a_unix_socket_in_an_engine_record_folder() {
     use std::os::unix::fs::PermissionsExt;
-    let (scratch, [project, home, tmp]) = folders();
+    let scratch = tempfile::tempdir_in(canonical(Path::new("/tmp")).unwrap()).unwrap();
     let root = canonical(scratch.path()).unwrap();
+    let [project, home, tmp] = ["project", "home", "tmp"].map(|name| root.join(name));
+    for folder in [&project, &home, &tmp] {
+        std::fs::create_dir(folder).unwrap();
+    }
     let runtime = root.join("runtime");
     std::fs::create_dir(&runtime).unwrap();
     std::fs::write(runtime.join("engine.db"), "engine secret\n").unwrap();
@@ -748,26 +753,23 @@ fn an_agent_cannot_bind_a_unix_socket_in_an_engine_record_folder() {
         .unwrap();
     let profile = root.join("agent.sb");
     sandbox.install(&profile).unwrap();
-    let script = "/usr/bin/nc -U -l \"$1\" & p=$!; i=0; \
-        while [ $i -lt 30 ] && [ ! -S \"$1\" ] && kill -0 $p 2>/dev/null; do \
-        sleep 0.1; i=$((i + 1)); done; \
-        kill $p 2>/dev/null; wait $p 2>/dev/null; test -S \"$1\"";
-    let bound = |mut command: std::process::Command, socket: &Path| {
-        command.args(["-c", script, "sh"]).arg(socket);
-        kernel_processes::spawn_gate::collected(&mut command)
-            .unwrap()
-            .status
-            .success()
+    let script = "socket(my $s, AF_UNIX, SOCK_STREAM, 0) or exit 3; \
+        if (bind($s, pack_sockaddr_un($ARGV[0]))) { print \"bound\"; exit 0 } \
+        print 0 + $!; exit 1";
+    let bind = |mut command: std::process::Command, socket: &Path| {
+        command.args(["-MSocket", "-e", script]).arg(socket);
+        let out = kernel_processes::spawn_gate::collected(&mut command).unwrap();
+        String::from_utf8(out.stdout).unwrap()
     };
+    let perl = Path::new("/usr/bin/perl");
     for kind in kinds {
         let socket = runtime.join(kind).join("s.sock");
-        let inside = sandbox.command(&profile, Path::new("/bin/sh"));
-        assert!(!bound(inside, &socket), "{kind}");
+        assert!(socket.as_os_str().len() < 104, "{}", socket.display());
+        let inside = bind(sandbox.command(&profile, perl), &socket);
+        assert!(["1", "13"].contains(&inside.as_str()), "{kind}: {inside}");
         assert!(std::fs::symlink_metadata(&socket).is_err(), "{kind}");
-        assert!(
-            bound(std::process::Command::new("/bin/sh"), &socket),
-            "{kind}"
-        );
+        let outside = bind(std::process::Command::new(perl), &socket);
+        assert_eq!(outside, "bound", "{kind}");
         std::fs::remove_file(&socket).unwrap();
     }
 }
