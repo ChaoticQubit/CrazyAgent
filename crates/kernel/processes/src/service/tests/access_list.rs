@@ -724,3 +724,34 @@ fn the_changeable_readers_hold_no_state_between_calls() {
     assert_eq!(held, Vec::<String>::new());
     assert_eq!(per_thread, 2);
 }
+
+/// The access list of a link is read for the link itself, not for the file it names: a link
+/// whose own list lets staff change it reads as shared, while the file it names, with no
+/// list, reads as not shared.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_answers_for_its_own_access_list_not_its_target() {
+    let temp = durable_folder();
+    let target = temp.path().join("target");
+    write_mode(&target, "", 0o644);
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let status = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .args([
+                "-h",
+                "+a",
+                "group:staff allow writeattr,writeextattr,delete",
+            ])
+            .arg(&link),
+    )
+    .unwrap();
+    assert!(status.success());
+    settle(&[&link, &target]);
+    let read = |entry: &Path| {
+        let metadata = std::fs::symlink_metadata(entry).unwrap();
+        acl::shared_all(&[(entry, &metadata)])
+    };
+    assert_eq!(read(&link), vec![Some(true)]);
+    assert_eq!(read(&target), vec![Some(false)]);
+}

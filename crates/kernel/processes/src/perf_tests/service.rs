@@ -151,7 +151,8 @@ fn old_copies(folder: &Path) -> (PathBuf, PathBuf) {
 /// Two control rows copy and format a fixed text the same way in both twins, so a gap they
 /// show is the test binary, not the service code; a NOTE line says whether the runner's own
 /// `~/.local/bin/crazyagent`, which `retire_old_copies` reads, is there.
-/// Prints one PERF line per call and asserts no time.
+/// `link_cli_repoint` names the other of two executables each call, so every call swaps
+/// the link. Prints one PERF line per call and asserts no time.
 #[test]
 #[ignore = "timing row: run through scripts/perf/run.sh"]
 fn service_calls() {
@@ -370,4 +371,19 @@ fn service_calls() {
     time(&row("service.cli_link.link_cli", ONE), SAMPLES, || {
         black_box(link_cli(&service.executable, &bin).unwrap());
     });
+    let repointed = executable(&home.join("app-other").join("crazyagent"));
+    let mut flip = false;
+    time(
+        &row("service.cli_link.link_cli_repoint", ONE),
+        SAMPLES,
+        || {
+            flip = !flip;
+            let named = if flip {
+                &repointed
+            } else {
+                &service.executable
+            };
+            black_box(link_cli(named, &bin).unwrap());
+        },
+    );
 }

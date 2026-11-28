@@ -47,8 +47,9 @@ const RELIST_TRIES: u32 = 3;
 /// root change it. Every entry's list is read on every call ([`list`]), and each entry is
 /// read again with `lstat` after the reads, so nothing an earlier call read is reused. An
 /// entry whose stamp moved meanwhile, as a folder's does when a file is made in it, is read
-/// again alone ([`moved_answer`]). Input: the entries, none a link, each with what `lstat`
-/// read of it first. Output: one answer per entry, in order; none when it cannot be read,
+/// again alone ([`moved_answer`]). Each list is read without following a link, so an
+/// entry that is a link answers for the link itself, not what it names. Input: the
+/// entries, each with what `lstat` read of it first. Output: one answer per entry, in order; none when it cannot be read,
 /// which counts as changeable.
 #[cfg(target_os = "macos")]
 pub(super) fn shared_all(entries: &[(&Path, &std::fs::Metadata)]) -> Vec<Option<bool>> {

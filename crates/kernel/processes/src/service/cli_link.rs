@@ -2,9 +2,11 @@ use super::*;
 
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:
 /// `~/.local/bin/crazyagent` on macOS and Linux. An absent name gets the link made in
-/// place, which never replaces a file that arrived first; a link already there is swapped
-/// for the new one in one step ([`replace_link`]) without a make tried first; any other
-/// file is refused and kept. Inputs: the executable and the bin folder. Output: the link.
+/// place, which never replaces a file that arrived first; a link already there is kept
+/// unwritten when it is this user's own and names the executable ([`kept_link`]), else
+/// swapped for the new one in one step ([`replace_link`]) without a make tried first; any
+/// other file is refused and kept. Inputs: the executable and the bin folder. Output: the
+/// link.
 #[cfg(unix)]
 pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> {
     let fail = |path: &Path, error: std::io::Error| failure(format!("{}: {error}", path.display()));
@@ -17,7 +19,8 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
     persisted(executable)?;
     std::fs::create_dir_all(bin).map_err(|error| fail(bin, error))?;
     let link = bin.join("crazyagent");
-    let mut there = match std::fs::symlink_metadata(&link) {
+    let found = std::fs::symlink_metadata(&link);
+    let mut there = match &found {
         Ok(metadata) if !metadata.file_type().is_symlink() => return Err(not_a_link(&link)),
         Ok(_) => true,
         Err(_) => false,
@@ -28,6 +31,11 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             step(&link);
         }
     });
+    if let Ok(metadata) = &found
+        && kept_link(&link, metadata, executable)
+    {
+        return Ok(link);
+    }
     for _ in 0..PUBLISH_ROUNDS_MAX {
         if !there {
             match std::os::unix::fs::symlink(executable, &link) {
@@ -42,6 +50,58 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
         there = false;
     }
     Err(not_a_link(&link))
+}
+
+/// Whether the link already at the name may stay as it is: read without following it, it
+/// names the executable by the same bytes, and `lstat` found it this user's own with no
+/// access list that lets another user change it ([`keeps`]). Any read that fails says no,
+/// so the link is swapped as before. Inputs: the link, what `lstat` read of it, and the
+/// executable. Output: the answer.
+#[cfg(unix)]
+fn kept_link(link: &Path, metadata: &std::fs::Metadata, executable: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    assert!(metadata.file_type().is_symlink());
+    let named = std::fs::read_link(link).ok();
+    keeps(
+        metadata.uid(),
+        current_uid(),
+        link_shared(link, metadata),
+        named.as_deref(),
+        executable,
+    )
+}
+
+/// The rule [`kept_link`] applies to what it read: the link's owner is this user, its
+/// access list lets no other user change it, and it names the executable by exactly the
+/// same bytes, so another spelling of the same path is not kept. Inputs: the link's owner,
+/// this user, the access-list answer, what the link names and the executable. Output:
+/// whether the link stays.
+#[cfg(unix)]
+pub(super) fn keeps(
+    owner: u32,
+    me: u32,
+    shared: Option<bool>,
+    named: Option<&Path>,
+    executable: &Path,
+) -> bool {
+    owner == me
+        && shared == Some(false)
+        && named.is_some_and(|named| named.as_os_str() == executable.as_os_str())
+}
+
+/// Whether a link's own access list lets another user change it, read without following
+/// the link ([`super::acl::shared_all`]). Input: the link and what `lstat` read of it.
+/// Output: the answer, none when it cannot be read.
+#[cfg(target_os = "macos")]
+fn link_shared(link: &Path, metadata: &std::fs::Metadata) -> Option<bool> {
+    super::acl::shared_all(&[(link, metadata)])[0]
+}
+
+/// Whether a link's own access list lets another user change it. Linux keeps no access
+/// list on a link, so the answer is always no. Inputs: unused. Output: the answer.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn link_shared(_link: &Path, _metadata: &std::fs::Metadata) -> Option<bool> {
+    Some(false)
 }
 
 /// The most rounds [`link_cli`] tries to publish when the name keeps going away between

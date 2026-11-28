@@ -208,7 +208,11 @@ fn a_link_with_an_access_list_for_others_is_swapped_for_a_new_one() -> TestResul
     let (_temp, executable, bin) = setup()?;
     let link = link_cli(&executable, &bin).unwrap();
     let status = std::process::Command::new("/bin/chmod")
-        .args(["-h", "+a", "group:staff allow writeattr,writeextattr,delete"])
+        .args([
+            "-h",
+            "+a",
+            "group:staff allow writeattr,writeextattr,delete",
+        ])
         .arg(&link)
         .status();
     assert!(at(&link, status)?.success());
@@ -216,5 +220,91 @@ fn a_link_with_an_access_list_for_others_is_swapped_for_a_new_one() -> TestResul
     assert_eq!(link_cli(&executable, &bin).unwrap(), link);
     assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
     assert_ne!(stamp_of(&link)?.0, before.0);
+    Ok(())
+}
+
+/// The keep rule says yes only for this user's link with no shared access list that names
+/// the executable by the same bytes, and no on every single miss.
+#[test]
+fn the_keep_rule_refuses_every_miss() {
+    let executable = Path::new("/apps/crazyagent");
+    let respelled = Path::new("/apps/./crazyagent");
+    let other = Path::new("/apps/other");
+    assert!(cli_link::keeps(
+        501,
+        501,
+        Some(false),
+        Some(executable),
+        executable
+    ));
+    assert!(!cli_link::keeps(
+        502,
+        501,
+        Some(false),
+        Some(executable),
+        executable
+    ));
+    assert!(!cli_link::keeps(
+        0,
+        501,
+        Some(false),
+        Some(executable),
+        executable
+    ));
+    assert!(!cli_link::keeps(
+        501,
+        501,
+        Some(true),
+        Some(executable),
+        executable
+    ));
+    assert!(!cli_link::keeps(
+        501,
+        501,
+        None,
+        Some(executable),
+        executable
+    ));
+    assert!(!cli_link::keeps(501, 501, Some(false), None, executable));
+    assert!(!cli_link::keeps(
+        501,
+        501,
+        Some(false),
+        Some(other),
+        executable
+    ));
+    assert!(!cli_link::keeps(
+        501,
+        501,
+        Some(false),
+        Some(respelled),
+        executable
+    ));
+}
+
+/// A link that names the executable but another user owns is swapped for a new link of this
+/// user. Making a link of another user needs root, so this row runs where `sudo` asks no
+/// password, on the macOS farm runner.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs sudo without a password: the macos-15 farm row"]
+fn a_link_another_user_owns_is_swapped_for_a_new_one() -> TestResult {
+    use std::os::unix::fs::MetadataExt;
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let status = std::process::Command::new("/usr/bin/sudo")
+        .args(["-n", "/usr/sbin/chown", "-h", "nobody"])
+        .arg(&link)
+        .status();
+    assert!(at(&link, status)?.success());
+    let owner = at(&link, std::fs::symlink_metadata(&link))?.uid();
+    assert_ne!(owner, rustix::process::getuid().as_raw());
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_eq!(
+        at(&link, std::fs::symlink_metadata(&link))?.uid(),
+        rustix::process::getuid().as_raw()
+    );
+    assert_eq!(names(&bin)?, vec!["crazyagent".to_string()]);
     Ok(())
 }
