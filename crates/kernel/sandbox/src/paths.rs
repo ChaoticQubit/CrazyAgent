@@ -805,6 +805,38 @@ impl Kept {
         Ok(())
     }
 
+    /// Tells whether a project root equals or sits in the engine folder, by entry, from walks
+    /// this build holds: the project's kept walk and, for the folder, the parts up to the
+    /// canonical engine path of the walk of one of its secrets, so no read is made beyond the
+    /// secrets' own. With no held part naming the folder it answers true, so the caller
+    /// refuses. Inputs: the project root, the canonical engine and its secrets. Output: the answer.
+    pub(crate) fn sits_in_engine(
+        &mut self,
+        project: &Path,
+        engine: &Path,
+        secrets: &[PathBuf],
+    ) -> Result<bool, SandboxError> {
+        self.walk_secrets(secrets)?;
+        let depth = engine.components().count();
+        let held = self
+            .walked
+            .secrets_of(secrets)
+            .find(|walk| walk.path.starts_with(engine) && walk.ids.len() > depth);
+        let Some(secret) = held else {
+            return Ok(true);
+        };
+        let Some(Some(_)) = secret.ids.get(depth - 1) else {
+            return Ok(true);
+        };
+        let folder = Walk {
+            path: engine.to_path_buf(),
+            ids: secret.ids[..depth].to_vec(),
+            reached: Vec::new(),
+        };
+        assert_eq!(folder.ids.len(), folder.path.components().count());
+        Ok(self.walk_of(project)?.sits_in(&folder))
+    }
+
     /// Walks again every kept path and every secret one was checked against, each once,
     /// sharing the reads; a kept path must read with the identities its grant kept, then its
     /// new walk is checked against the secrets' new walks. Output: unit, `Invalid` with

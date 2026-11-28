@@ -218,3 +218,66 @@ fn an_engine_scratch_guarded_against_another_engine_folder_is_refused() {
         .map(|error| crate::lines::invalid_code(&error));
     assert_eq!(refused, Some("project_in_engine_folder"));
 }
+
+/// A guarded build of a project folder beside an engine root holding its database and one
+/// record folder. Input: the engine root. Output: the project folder and the guarded build.
+fn guarded_beside(root: &Path) -> (PathBuf, super::ProjectSandbox) {
+    let (home, tmp) = agent_folders(root);
+    filled(&root.join(RECORDS), 0o700, 1);
+    let project = root.parent().unwrap().join("project");
+    fs::create_dir(&project).unwrap();
+    let network = super::SandboxNetwork::Only(Vec::new());
+    let sandbox = super::ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, network)
+        .and_then(|sandbox| sandbox.guard_engine(root))
+        .unwrap();
+    (project, sandbox)
+}
+
+/// The refusal reason of an install. Inputs: the build and the profile path. Output: the
+/// reason the install was refused with.
+fn install_reason(sandbox: &super::ProjectSandbox, profile: &Path) -> String {
+    match sandbox.install(profile) {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("expected an Invalid refusal, got {other:?}"),
+    }
+}
+
+/// The engine folder swapped for a link to the project folder after the guard refuses the
+/// install: the guard judged the project by the engine walks the build holds, and the
+/// install walks each engine secret again, which now leads into the project.
+#[test]
+fn an_engine_folder_swapped_for_a_link_to_the_project_after_the_guard_refuses_the_install() {
+    let (scratch, root) = engine_root();
+    let (project, sandbox) = guarded_beside(&root);
+    fs::rename(&root, root.with_file_name("engine.old")).unwrap();
+    std::os::unix::fs::symlink(&project, &root).unwrap();
+    let reason = install_reason(&sandbox, &scratch.path().join("agent.sb"));
+    assert_eq!(reason, crate::paths::SECRET_ROOT_REFUSED);
+}
+
+/// The project folder swapped for a link into the engine after the guard refuses the
+/// install: the guard judged the project by its kept walk, and the install walks it again
+/// and finds another folder there.
+#[test]
+fn a_project_folder_swapped_for_a_link_into_the_engine_after_the_guard_refuses_the_install() {
+    let (scratch, root) = engine_root();
+    let (project, sandbox) = guarded_beside(&root);
+    fs::rename(&project, project.with_file_name("project.old")).unwrap();
+    std::os::unix::fs::symlink(root.join(RECORDS), &project).unwrap();
+    let reason = install_reason(&sandbox, &scratch.path().join("agent.sb"));
+    assert_eq!(reason, crate::paths::GRANT_CHANGED);
+}
+
+/// With no held walk that names the engine folder, the project check answers that the
+/// project sits in it, so the guard refuses rather than lets a project through unjudged.
+#[test]
+fn a_project_check_with_no_held_engine_walk_fails_closed() {
+    let (_scratch, root) = engine_root();
+    let outside = root.parent().unwrap().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let owner = crate::paths::owner_home().unwrap();
+    let mut kept = crate::paths::Kept::of(&owner, &[], &[]).unwrap();
+    assert!(kept.sits_in_engine(&outside, &root, &[]).unwrap());
+    let elsewhere = vec![outside.join("not-in-the-engine")];
+    assert!(kept.sits_in_engine(&outside, &root, &elsewhere).unwrap());
+}

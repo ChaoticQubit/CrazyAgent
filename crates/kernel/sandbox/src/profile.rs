@@ -634,8 +634,8 @@ impl ProjectSandbox {
         if !clean_absolute(&runtime) || !runtime.is_dir() {
             return Err(invalid("engine runtime must be an existing plain folder"));
         }
-        self.project_clear_of_engine(&runtime)?;
         let secrets = engine_secrets_in(self.hooks, &runtime)?;
+        self.project_clear_of_engine(&runtime, &secrets)?;
         for root in self.guarded_paths() {
             self.kept.clear(&root, &secrets)?;
         }
@@ -662,9 +662,13 @@ impl ProjectSandbox {
     /// Refuses a sandbox whose project folder equals or sits in the engine folder, judged by
     /// entry so another spelling or a link on the way counts too: its agents could write the
     /// engine's own state there. A scratch made in this same engine folder, judged by entry,
-    /// is the one exception; the agent's home and temp are never judged. Input: the canonical
-    /// engine folder. Output: unit, or `Invalid` with [`crate::lines::project_in_engine_line`].
-    fn project_clear_of_engine(&self, engine: &Path) -> Result<(), SandboxError> {
+    /// is the one exception; the agent's home and temp are never judged. Inputs: the canonical
+    /// engine folder and its secrets. Output: unit, or `Invalid` with the engine line.
+    fn project_clear_of_engine(
+        &mut self,
+        engine: &Path,
+        secrets: &[PathBuf],
+    ) -> Result<(), SandboxError> {
         if let Some(made_in) = &self.scratch_engine
             && sits_in_folder(made_in, engine)?
             && sits_in_folder(engine, made_in)?
@@ -672,7 +676,10 @@ impl ProjectSandbox {
             assert!(sits_in_folder(&self.project_root, engine)?);
             return Ok(());
         }
-        if sits_in_folder(&self.project_root, engine)? {
+        if self
+            .kept
+            .sits_in_engine(&self.project_root, engine, secrets)?
+        {
             return Err(invalid(&project_in_engine_line(engine)));
         }
         assert!(!self.project_root.starts_with(engine));
@@ -702,13 +709,13 @@ impl ProjectSandbox {
                 "engine root must be the existing folder around the runtime",
             ));
         }
-        self.project_clear_of_engine(&engine)?;
         let carved = carved_folder(self.hooks, &engine, &self.agent_home)
             .map(|folder| (self.agent_home.clone(), folder));
         let secrets: Vec<PathBuf> = engine_secrets_in(self.hooks, &engine)?
             .into_iter()
             .filter(|secret| *secret != runtime)
             .collect();
+        self.project_clear_of_engine(&engine, &secrets)?;
         let around_home: Vec<PathBuf> = secrets
             .iter()
             .filter(|secret| carved.as_ref().is_none_or(|(_, folder)| *secret != folder))
