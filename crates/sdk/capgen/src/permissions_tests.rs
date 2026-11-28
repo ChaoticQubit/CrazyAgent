@@ -113,7 +113,10 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
             (
                 "t1",
                 "c-plugin",
-                &manifest("c-plugin", "t1", "[\"secrets.find\"]"),
+                &format!(
+                    "{}capabilities = [\"projects\"]\n",
+                    manifest("c-plugin", "t1", "[\"secrets.find\"]")
+                ),
             ),
             (
                 "t2",
@@ -134,6 +137,10 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
     let flat: String = text.split_whitespace().collect();
     assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;3]"));
     assert!(flat.contains("plugin:\"b-plugin\",tier:Tier::T3,permissions:&[],essential:false,"));
+    assert!(flat.contains(
+        "plugin:\"c-plugin\",tier:Tier::T1,permissions:&[\"secrets.find\"],essential:false,capabilities:&[\"projects\"],"
+    ));
+    assert_eq!(flat.matches("capabilities:&[\"").count(), 1);
     fs::remove_dir_all(&root).expect("the folder is removed");
 }
 

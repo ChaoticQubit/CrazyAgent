@@ -1,7 +1,7 @@
 /// The plain words the owner reads for each permission a plugin may hold, keyed by the
 /// permission name, one row per entry of the generated permission table, sent with the
 /// plugin listing so every screen shows the same text.
-pub const WORDS: [(&str, &str); 15] = [
+pub const WORDS: [(&str, &str); 16] = [
     (
         "editor.spawn",
         "Open one of your projects in the code editor",
@@ -15,6 +15,7 @@ pub const WORDS: [(&str, &str); 15] = [
         "Install or update a tool on this computer",
     ),
     ("project_rows.page", "Read the list of your projects"),
+    ("projects.list", "See the list of your projects"),
     (
         "sandbox.save_settings",
         "Change the sandbox settings that limit what agents can reach",

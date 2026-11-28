@@ -219,7 +219,7 @@ fn same(items: &[OwnerSummary], more: bool, page: &RowsPage) -> bool {
 /// only the cursor and limit the engine asked for, runs the engine's page read in the read
 /// transaction, counts every call it serves, and keeps the engine items and `more`, or the
 /// error, for the caller; the SDK rows move out to the plugin.
-struct RowsProvider<'t, 'c, 'a> {
+pub(crate) struct RowsProvider<'t, 'c, 'a> {
     tx: &'t Transaction<'c>,
     after: &'a str,
     limit: u16,
@@ -231,7 +231,7 @@ struct RowsProvider<'t, 'c, 'a> {
 impl<'t, 'c, 'a> RowsProvider<'t, 'c, 'a> {
     /// A provider that has served no call. Inputs: the read transaction and the id to read
     /// past ("" for the first page) and the limit the engine asked for. Output: it.
-    fn new(tx: &'t Transaction<'c>, after: &'a str, limit: u16) -> Self {
+    pub(crate) fn new(tx: &'t Transaction<'c>, after: &'a str, limit: u16) -> Self {
         Self {
             tx,
             after,
@@ -283,3 +283,6 @@ impl project_rows::Provide for RowsProvider<'_, '_, '_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod served_tests;
