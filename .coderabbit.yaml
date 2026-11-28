@@ -53,7 +53,7 @@ reviews:
         Flag unwrap or expect on values that come from user input, files, IPC or the network.
         Flag blocking calls inside async code and locks held across await points.
         Process spawning, filesystem paths and environment variables are trust boundaries.
-        With rusqlite use prepare, never prepare_cached: the crate is built without its cache feature.
+        With rusqlite, a fixed statement run on every save uses prepare_cached, and the connection's statement cache capacity (crazyagent state_log::initialize) must cover it; a statement run once per call uses prepare. Only crazyagent-kernel-storage and crazyagent build rusqlite's cache feature.
     - path: "apps/desktop/src-tauri/**"
       instructions: |
         Tauri host side. Every command exposed to the webview is a trust boundary. Check that it validates its arguments and does not widen filesystem, shell or network access.
