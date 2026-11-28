@@ -686,3 +686,42 @@ fn a_grant_against_a_list_without_a_harness_home_trips_the_build() {
         .collect();
     let _ = granted_build(&home, &without, &root);
 }
+
+/// A home whose bytes equal a secret entry, as every production build's do, is found
+/// without a `Path` compare.
+#[test]
+fn a_home_spelled_as_its_secret_entry_is_found_by_its_bytes() {
+    let secrets = [
+        PathBuf::from("/owner/.codex"),
+        PathBuf::from("/owner/.claude"),
+    ];
+    let before = home_fallbacks();
+    assert!(holds_home(&secrets, Path::new("/owner/.claude")));
+    assert_eq!(home_fallbacks(), before);
+}
+
+/// A home spelled with a trailing slash or a `.` part still matches the entry `Path`
+/// compares equal to, through the `Path` compare.
+#[test]
+fn a_home_spelled_another_way_still_matches_its_secret_entry() {
+    let secrets = [
+        PathBuf::from("/owner/.codex"),
+        PathBuf::from("/owner/.claude"),
+    ];
+    for home in ["/owner/.claude/", "/owner/./.claude"] {
+        let before = home_fallbacks();
+        assert!(holds_home(&secrets, Path::new(home)), "{home}");
+        assert_eq!(home_fallbacks(), before + 1, "{home}");
+    }
+}
+
+/// A home no entry names, in bytes or as a path, is not held.
+#[test]
+fn a_home_no_secret_entry_names_is_not_held() {
+    let secrets = [
+        PathBuf::from("/owner/.codex"),
+        PathBuf::from("/owner/.claude.json"),
+    ];
+    assert!(!holds_home(&secrets, Path::new("/owner/.claude")));
+    assert!(!holds_home(&secrets, Path::new("/other/.claude")));
+}

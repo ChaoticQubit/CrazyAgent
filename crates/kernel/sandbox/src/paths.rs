@@ -325,6 +325,28 @@ pub(crate) fn walks() -> usize {
     WALKS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times [`holds_home`] compared by `Path` on this thread, read through
+    /// [`home_fallbacks`].
+    static HOME_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of `Path` compares [`holds_home`] made on this thread so far, read by the
+/// grant rows. Takes nothing. Returns the count.
+#[cfg(test)]
+pub(crate) fn home_fallbacks() -> usize {
+    HOME_FALLBACKS.with(std::cell::Cell::get)
+}
+
+/// Whether `secrets` holds `home`, compared as paths, so another spelling of the same path
+/// counts. Inputs: the secret paths and the home. Output: the answer.
+fn holds_home(secrets: &[PathBuf], home: &Path) -> bool {
+    #[cfg(test)]
+    HOME_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
+    secrets.iter().any(|secret| secret == home)
+}
+
 /// The most links whose targets do not exist yet one walk follows from its first missing
 /// run before it refuses the path.
 const DANGLING_LINK_HOPS: usize = 16;
@@ -745,7 +767,7 @@ impl Kept {
             self.walked
                 .harnesses
                 .iter()
-                .all(|home| secrets.contains(&home.path)),
+                .all(|home| holds_home(secrets, &home.path)),
             "a grant is checked against every harness home"
         );
         deep_plain(root)?;
