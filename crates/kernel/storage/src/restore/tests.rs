@@ -836,6 +836,15 @@ fn two_slots(first: Vec<u8>, second: Vec<u8>) -> Vec<u8> {
 }
 
 #[test]
+fn record_writes_on_a_thread_that_records_nothing_keep_no_write() {
+    let root = record_root();
+    for _ in 0..3 {
+        write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    }
+    assert_eq!(record::take_writes(), Vec::<bool>::new());
+}
+
+#[test]
 fn a_good_newest_slot_is_the_only_slot_a_read_checks() {
     let cases = [
         (
