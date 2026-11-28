@@ -21,7 +21,17 @@ fn the_listing_shows_each_plugins_granted_capabilities_with_their_tier() {
         .iter()
         .map(|grants| grants.plugin.as_str())
         .collect();
-    assert_eq!(ids, ["agent-quit", "near", "ollama", "openai", "voyage"]);
+    assert_eq!(
+        ids,
+        [
+            "agent-quit",
+            "near",
+            "ollama",
+            "openai",
+            "projects",
+            "voyage"
+        ]
+    );
     assert_eq!(
         entry(&listing, "agent-quit", Origin::Bundled),
         &PluginGrants {

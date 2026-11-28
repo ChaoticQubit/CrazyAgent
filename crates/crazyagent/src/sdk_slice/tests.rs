@@ -263,7 +263,7 @@ fn the_engine_depends_on_plugins_only_from_the_plugins_folder() {
             }
         }
     }
-    assert_eq!(plugins.len(), 1);
+    assert_eq!(plugins.len(), 2);
     for (tier, folder) in plugins {
         let manifest = plugin_check::read_manifest(&folder).unwrap();
         assert_eq!(manifest.tier, tier, "the folder tier is the manifest tier");

@@ -11,10 +11,11 @@ use crate::{Bound, Providers};
 
 const BATCH: usize = 1000;
 const PLUGIN: &str = "perf";
-const PERMISSIONS: [&str; 12] = [
+const PERMISSIONS: [&str; 13] = [
     "editor.spawn",
     "net.request",
     "process.install",
+    "project_rows.read",
     "sandbox.settings_write",
     "sandbox.settings_read",
     "secrets.put",
@@ -227,7 +228,7 @@ fn recipe() -> process::InstallRecipe {
     }
 }
 
-/// Times each of the 14 capability calls through the generated host binding a plugin
+/// Times each of the 15 capability calls through the generated host binding a plugin
 /// holds, with a no-op provider, after checking each answer once. Owned inputs are built
 /// inside the timed step, so a row with a text input also holds that input's copy.
 /// Prints one PERF line per call and asserts no time.
@@ -259,6 +260,13 @@ fn capability_calls() {
         Ok(0)
     );
     assert_eq!(
+        project_rows::page(&host, None, 16),
+        Ok(project_rows::RowsPage {
+            rows: Vec::new(),
+            more: false,
+        })
+    );
+    assert_eq!(
         sandbox::save_settings(&host, SANDBOX, SETTINGS_VERSION),
         Ok(())
     );
@@ -287,6 +295,9 @@ fn capability_calls() {
     });
     time(&row("bound.process.install"), SAMPLES, || {
         let _ = black_box(process::install(host, recipe()));
+    });
+    time(&row("bound.project_rows.page"), SAMPLES, || {
+        let _ = black_box(project_rows::page(host, None, black_box(16)));
     });
     time(&row("bound.sandbox.save_settings"), SAMPLES, || {
         let _ = black_box(sandbox::save_settings(

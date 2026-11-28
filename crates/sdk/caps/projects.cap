@@ -1,0 +1,5 @@
+type ProjectView { id: text, name: text, repository_count: u16 }
+type ProjectPage { items: list<ProjectView>, more: bool }
+capability projects.list(after: option<text>, limit: u16) -> ProjectPage
+  tier: t1
+  needs: projects.read

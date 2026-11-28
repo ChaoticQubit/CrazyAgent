@@ -895,6 +895,7 @@ dependencies = [
  "crazyagent-macos-fs",
  "crazyagent-plugin-agent-quit",
  "crazyagent-plugin-check",
+ "crazyagent-plugin-projects",
  "crazyagent-sdk",
  "crazyagent-sdk-host",
  "crazyagent-win-sandbox",
@@ -1131,6 +1132,14 @@ dependencies = [
  "proc-macro2",
  "syn 2.0.119",
  "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "crazyagent-plugin-projects"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-plugin-check",
+ "crazyagent-sdk",
 ]
 
 [[package]]

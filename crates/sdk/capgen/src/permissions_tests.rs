@@ -98,7 +98,7 @@ fn the_permission_table_lists_every_capability() {
     assert!(flat.contains(
         "name:\"settings.save_quit\",tier:Tier::Kernel,needs:\"settings.write\",emits:&[\"AgentQuitSaved\"],"
     ));
-    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;1]"));
+    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;2]"));
     assert!(flat.contains(
         "plugin:\"agent-quit\",tier:Tier::T2,permissions:&[\"settings.write\"],essential:true,"
     ));
@@ -113,7 +113,10 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
             (
                 "t1",
                 "c-plugin",
-                &manifest("c-plugin", "t1", "[\"secrets.find\"]"),
+                &format!(
+                    "{}capabilities = [\"projects\"]\n",
+                    manifest("c-plugin", "t1", "[\"secrets.find\"]")
+                ),
             ),
             (
                 "t2",
@@ -134,6 +137,10 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
     let flat: String = text.split_whitespace().collect();
     assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;3]"));
     assert!(flat.contains("plugin:\"b-plugin\",tier:Tier::T3,permissions:&[],essential:false,"));
+    assert!(flat.contains(
+        "plugin:\"c-plugin\",tier:Tier::T1,permissions:&[\"secrets.find\"],essential:false,capabilities:&[\"projects\"],"
+    ));
+    assert_eq!(flat.matches("capabilities:&[\"").count(), 1);
     fs::remove_dir_all(&root).expect("the folder is removed");
 }
 
@@ -177,7 +184,7 @@ fn a_manifest_refusal_names_its_file_and_line() {
 }
 
 /// Every essential bundled code plugin is marked so in its own `plugin.toml`, and the
-/// generated table carries each file's mark: today exactly `agent-quit`.
+/// generated table carries each file's mark: exactly `agent-quit` and `projects`.
 #[test]
 fn every_essential_plugin_is_marked_in_its_plugin_file() {
     use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
@@ -186,7 +193,7 @@ fn every_essential_plugin_is_marked_in_its_plugin_file() {
         .filter(|grant| grant.essential)
         .map(|grant| grant.plugin)
         .collect();
-    assert_eq!(essential, ["agent-quit"]);
+    assert_eq!(essential, ["agent-quit", "projects"]);
     for grant in &BUNDLED_GRANTS {
         let dir = ["t1", "t2", "t3"]
             .iter()

@@ -525,6 +525,75 @@ fn gateway_sandbox_save_settings_p95() {
     assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
 }
 
+/// A projects provider that answers every read with one fixed 16-row page, cloned per call
+/// on both paths, so a timing holds only the call path.
+struct FixedPage(sdk::generated::project_rows::RowsPage);
+
+impl sdk::generated::project_rows::Provide for FixedPage {
+    fn page(
+        &self,
+        caller: &'static str,
+        after: Option<String>,
+        limit: u16,
+    ) -> Result<sdk::generated::project_rows::RowsPage, Refusal> {
+        black_box((caller, after, limit));
+        Ok(self.0.clone())
+    }
+}
+
+/// Times one `project_rows.page` call's overhead through the generated binding and the
+/// gateway core against its budget, the way the secrets row does, on a fixed 16-row page.
+/// Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::projects_page_overhead -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn projects_page_overhead() {
+    use sdk::generated::project_rows::{self, ProjectRow, Provide, RowsPage};
+    let (budget, condition) = budget();
+    let grants = Grants::new(&[(PLUGIN, Tier::T1, &["project_rows.read"])]).unwrap();
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
+    let fixed = FixedPage(RowsPage {
+        rows: (0..16_u16)
+            .map(|n| ProjectRow {
+                id: format!("p{n:03}"),
+                name: format!("Project {n}"),
+                repository_count: n % 4,
+            })
+            .collect(),
+        more: true,
+    });
+    let providers = Providers {
+        editor: &NoEditor,
+        net: &NoNet,
+        process: &NoProcess,
+        project_rows: &fixed,
+        sandbox: &NoSandbox,
+        secrets: &NoSecrets,
+        settings: &Noop,
+        service: &NoService,
+        update: &NoUpdate,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
+    assert_eq!(project_rows::page(&bound, None, 16), Ok(fixed.0.clone()));
+    let mut direct_call = || {
+        black_box(fixed.page(PLUGIN, black_box(None), black_box(16))).unwrap();
+    };
+    let mut sdk_call = || {
+        black_box(project_rows::page(&bound, black_box(None), black_box(16))).unwrap();
+    };
+    let mut overhead = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let plain = batch(&mut direct_call);
+        overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+    }
+    overhead.sort_unstable();
+    let p95 = report("projects", &overhead);
+    println!("projects.page.overhead condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
+}
+
 /// The kernel clock of the served overhead rows: answers at once, so a timing holds only
 /// the call path.
 struct NoopClock;

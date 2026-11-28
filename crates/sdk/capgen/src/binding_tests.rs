@@ -50,6 +50,9 @@ fn host_mod_rs_equals_capgen_output() {
     );
 }
 
+/// The stems the prod binding serves through a plugin, not through a kernel provider.
+const SERVED: [&str; 1] = ["projects"];
+
 #[test]
 fn the_host_binding_is_generated_for_every_capability() {
     let loaded = load(&sdk("caps")).expect("the caps load");
@@ -66,15 +69,29 @@ fn the_host_binding_is_generated_for_every_capability() {
         flat.starts_with(&used) || flat.starts_with(&wrapped),
         "{used} or {wrapped}"
     );
-    let fields: String = stems
+    assert!(stems.contains(&"projects"));
+    let provided: Vec<&str> = stems
+        .iter()
+        .copied()
+        .filter(|stem| !SERVED.contains(stem))
+        .collect();
+    let fields: String = provided
         .iter()
         .map(|stem| format!("pub{stem}:&'pdyn{stem}::Provide,"))
         .collect();
     let providers = format!("pubstructProviders<'p>{{{fields}}}");
     assert!(flat.contains(&providers), "{providers}");
-    assert!(flat.contains("pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,}"));
+    assert!(!flat.contains("pubprojects:&'pdynprojects::Provide"));
+    assert!(flat.contains(
+        "pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,served:&'pServed<'p>,}"
+    ));
     let mut count = 0;
+    let mut served = 0;
     for (stem, file) in &loaded {
+        if SERVED.contains(&stem.as_str()) {
+            served += file.capabilities.len();
+            continue;
+        }
         for capability in &file.capabilities {
             let function = capability.name[stem.len() + 1..].replace('.', "_");
             let constant = function.to_ascii_uppercase();
@@ -110,6 +127,8 @@ fn the_host_binding_is_generated_for_every_capability() {
         "no capability without inputs"
     );
     assert_eq!(flat.matches("self.caller.call(").count(), count);
+    assert_eq!(served, 1);
+    assert_eq!(flat.matches("self.caller.serve(").count(), served);
     assert!(flat.contains(
         "fnsettings_save_quit(&self,settings:sdk::generated::settings::QuitSettings,)->Result<(),Refusal>{self.caller.call(&settings::SAVE_QUIT,settings,settings::check_save_quit_input,|settings|{self.providers.settings.save_quit(self.caller.plugin(),settings)},settings::check_save_quit_output,)}"
     ));
@@ -188,10 +207,24 @@ fn the_fixture_binding_equals_capgen_output() {
 
 #[test]
 fn the_binding_writes_served_unserved_and_bound_serving_only_with_a_served_stem() {
-    let prod: String = binding_from_caps()[0].1.split_whitespace().collect();
+    let kernel_only = flat_binding(&[(
+        "clock",
+        "capability clock.now() -> u64 tier: kernel needs: clock.read",
+    )]);
     for absent in ["Served", "Unserved", "fnserving(", "served:", "::Serve"] {
-        assert!(!prod.contains(absent), "{absent}");
+        assert!(!kernel_only.contains(absent), "{absent}");
     }
+    let prod: String = binding_from_caps()[0].1.split_whitespace().collect();
+    assert!(
+        prod.contains("pubstructServed<'p>{pubprojects:&'pdynprojects::Serve,}"),
+        "{prod}"
+    );
+    assert!(prod.contains("pubconstNONE:Served<'static>=Served{projects:&Unserved,};"));
+    assert_eq!(
+        prod.matches("self.caller.serve(&projects::LIST,").count(),
+        1
+    );
+    assert_eq!(prod.matches("self.caller.serve(").count(), 1);
     let flat: String = served_binding()[0].1.split_whitespace().collect();
     assert!(
         flat.starts_with(

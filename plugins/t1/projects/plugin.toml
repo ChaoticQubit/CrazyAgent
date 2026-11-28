@@ -1,0 +1,7 @@
+plugin = "projects"
+tier = "t1"
+kind = "foundation"
+version = 1
+permissions = ["project_rows.read"]
+essential = true
+capabilities = ["projects"]

@@ -156,6 +156,26 @@ interface project-rows {
   page: func(after: option<string>, limit: u16) -> result<rows-page, refusal>;
 }
 
+interface projects-types {
+  record project-view {
+    id: string,
+    name: string,
+    repository-count: u16,
+  }
+
+  record project-page {
+    items: list<project-view>,
+    more: bool,
+  }
+}
+
+interface projects {
+  use sdk-types.{refusal};
+  use projects-types.{project-page};
+
+  %list: func(after: option<string>, limit: u16) -> result<project-page, refusal>;
+}
+
 interface sandbox-types {
   enum linux-sockets {
     tcp-only,
@@ -282,6 +302,7 @@ world plugin {
   import net;
   import process;
   import project-rows;
+  import projects;
   import sandbox;
   import secrets;
   import service;

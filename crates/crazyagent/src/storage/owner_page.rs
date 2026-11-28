@@ -30,3 +30,6 @@ pub(super) fn page_next(
         after_id: last.ok_or_else(|| error("owner_page_progress"))?,
     }))
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod perf_tests;

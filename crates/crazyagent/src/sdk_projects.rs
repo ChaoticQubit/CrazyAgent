@@ -1,8 +1,26 @@
+use std::cell::{Cell, RefCell};
+
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerSummary;
 use crate::protocol::{FRAME_BYTES_MAX, RequestId, StoredProject};
+use crate::sdk_slice::{CallRecord, EngineRefusals};
+use bus_gateway::{Gateway, Grants, Switches};
+use crazyagent_plugin_projects as projects;
 use rusqlite::{Transaction, params};
-use sdk::generated::project_rows::{ProjectRow, RowsPage};
+use sdk::Refusal;
+use sdk::generated::project_rows::{self, ProjectRow, RowsPage};
+use sdk_host::{Bound, Providers};
+
+/// The bundled plugin that serves the projects list, the one caller `project_rows.page`
+/// answers.
+pub(crate) const PROJECTS_PLUGIN: &str = "projects";
+
+/// The refusal a `project_rows.page` call from any plugin but the projects plugin gets.
+const CALLER_REFUSED: &str = "project_rows_caller";
+
+/// The refusal a `project_rows.page` call gets when its cursor or limit is not the one the
+/// engine asked the plugin for.
+const REQUEST_REFUSED: &str = "project_rows_request";
 
 /// The projects page read: one page of rows past an id, each id and body bounded in SQL so
 /// an oversized row reads as NULL.
@@ -62,7 +80,7 @@ pub(crate) fn rows(tx: &Transaction<'_>, after: &str, limit: u16) -> Result<Kept
     if !(1..=LIMIT_MAX).contains(&limit) {
         return Err(error("owner_page_limit"));
     }
-    let mut stmt = tx.prepare(SQL).map_err(error)?;
+    let mut stmt = tx.prepare_cached(SQL).map_err(error)?;
     let mut found = stmt
         .query(params![after, i64::from(limit) + 1])
         .map_err(error)?;
@@ -110,5 +128,161 @@ pub(crate) fn rows(tx: &Transaction<'_>, after: &str, limit: u16) -> Result<Kept
     })
 }
 
+/// A bundled projects plugin's list entry: what the plugin crate exports for the engine to
+/// call with the host bound to it. Inputs: the host, the id the page starts after and the
+/// page size. Output: the plugin's page, which the engine reads as input, never as an
+/// invariant.
+pub(crate) type ListEntry = fn(&dyn sdk::Host, Option<String>, u16) -> Result<RowsPage, Refusal>;
+
+/// Reads one projects page through the bundled projects plugin, the generated SDK and the
+/// bus gateway's switch and grant checks, in the caller's transaction. A refusal is queued
+/// in the engine sink but never logged here: reads never drain it, the next owner request
+/// does. Inputs: the read transaction, the id to read past ("" for the first page) and the
+/// limit. Output: the same page or error as a direct read, or `plugin_call_refused`.
+pub(crate) fn page(tx: &Transaction<'_>, after: &str, limit: u16) -> Result<Kept, EngineError> {
+    page_with(
+        projects::list,
+        crate::sdk_slice::bundled_grants(),
+        crate::app_plugins::switches(),
+        crate::sdk_slice::engine_refusals(),
+        tx,
+        after,
+        limit,
+    )
+}
+
+/// Reads one projects page through a plugin entry with a given grant table, plugin switches
+/// and refusal sink. The plugin's page is input: a refusal the gateway recorded in this call
+/// is `plugin_call_refused`; one admitted call whose page equals the rows the provider kept
+/// is those rows; a failed call whose code is the kept error is that error; every other
+/// shape is `plugin_call_invalid`. Inputs: the entry, the grants, the switches, the sink,
+/// the transaction, the id to read past and the limit.
+pub(crate) fn page_with(
+    entry: ListEntry,
+    grants: &Grants,
+    switches: &dyn Switches,
+    refusals: &EngineRefusals,
+    tx: &Transaction<'_>,
+    after: &str,
+    limit: u16,
+) -> Result<Kept, EngineError> {
+    let provider = RowsProvider::new(tx, after, limit);
+    let record = CallRecord {
+        sink: refusals,
+        refused: Cell::new(false),
+    };
+    let gateway = Gateway::new(grants, &record, switches);
+    let editor = crate::sdk_editor::EditorCaps::unregistered(tx);
+    let providers = Providers {
+        editor: &editor,
+        net: &crate::security_caps::Absent,
+        process: &crate::sdk_install::InstallCaps::UNREGISTERED,
+        project_rows: &provider,
+        sandbox: &crate::security_caps::Absent,
+        secrets: &crate::security_caps::Absent,
+        settings: &crate::security_caps::Absent,
+        service: &crate::security_caps::Absent,
+        update: &crate::security_caps::Absent,
+    };
+    let host = Bound::new(gateway.bind(PROJECTS_PLUGIN), &providers);
+    let result = entry(&host, (!after.is_empty()).then(|| after.to_owned()), limit);
+    if record.refused.get() {
+        return Err(EngineError("plugin_call_refused".to_owned()));
+    }
+    let invalid = || Err(EngineError("plugin_call_invalid".to_owned()));
+    if provider.calls.get() != 1 {
+        return invalid();
+    }
+    match (result, provider.kept.take(), provider.error.take()) {
+        (Ok(page), Some((items, more)), None) if same(&items, more, &page) => {
+            Ok(Kept { items, page })
+        }
+        (Err(Refusal::Failed { code }), None, Some(error)) if code == error.0 => Err(error),
+        _ => invalid(),
+    }
+}
+
+/// Whether a plugin's page holds exactly the rows the provider kept, field by field and in
+/// order. Inputs: the kept items, the kept `more` and the plugin's page. Output: the answer.
+fn same(items: &[OwnerSummary], more: bool, page: &RowsPage) -> bool {
+    page.more == more
+        && items.len() == page.rows.len()
+        && items.iter().zip(&page.rows).all(|(item, row)| {
+            matches!(item, OwnerSummary::Project { project_id, name, repository_count }
+                if project_id.as_str() == row.id
+                    && *name == row.name
+                    && *repository_count == usize::from(row.repository_count))
+        })
+}
+
+/// The `project_rows.page` provider for one read: it answers only the projects plugin and
+/// only the cursor and limit the engine asked for, runs the engine's page read in the read
+/// transaction, counts every call it serves, and keeps the engine items and `more`, or the
+/// error, for the caller; the SDK rows move out to the plugin.
+pub(crate) struct RowsProvider<'t, 'c, 'a> {
+    tx: &'t Transaction<'c>,
+    after: &'a str,
+    limit: u16,
+    calls: Cell<u32>,
+    kept: RefCell<Option<(Vec<OwnerSummary>, bool)>>,
+    error: RefCell<Option<EngineError>>,
+}
+
+impl<'t, 'c, 'a> RowsProvider<'t, 'c, 'a> {
+    /// A provider that has served no call. Inputs: the read transaction and the id to read
+    /// past ("" for the first page) and the limit the engine asked for. Output: it.
+    pub(crate) fn new(tx: &'t Transaction<'c>, after: &'a str, limit: u16) -> Self {
+        Self {
+            tx,
+            after,
+            limit,
+            calls: Cell::new(0),
+            kept: RefCell::new(None),
+            error: RefCell::new(None),
+        }
+    }
+}
+
+impl project_rows::Provide for RowsProvider<'_, '_, '_> {
+    /// Serves one page to the projects plugin at the cursor and limit the engine asked for;
+    /// `None` reads from the first id, as `""` does. Inputs: the caller, the id to read past
+    /// and the limit. Output: the SDK rows, `project_rows_caller` for another caller,
+    /// `project_rows_request` for another cursor or limit, or the engine error's code as a
+    /// failure.
+    fn page(
+        &self,
+        caller: &'static str,
+        after: Option<String>,
+        limit: u16,
+    ) -> Result<RowsPage, Refusal> {
+        if caller != PROJECTS_PLUGIN {
+            return Err(Refusal::Rejected {
+                code: CALLER_REFUSED.to_owned(),
+            });
+        }
+        let after = after.as_deref().unwrap_or("");
+        if after != self.after || limit != self.limit {
+            return Err(Refusal::Rejected {
+                code: REQUEST_REFUSED.to_owned(),
+            });
+        }
+        self.calls.set(self.calls.get().saturating_add(1));
+        match rows(self.tx, after, limit) {
+            Ok(Kept { items, page }) => {
+                *self.kept.borrow_mut() = Some((items, page.more));
+                Ok(page)
+            }
+            Err(error) => {
+                let code = error.0.clone();
+                *self.error.borrow_mut() = Some(error);
+                Err(Refusal::Failed { code })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod served_tests;
