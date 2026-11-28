@@ -19,7 +19,7 @@ const PAGE_SIZE: u8 = 16;
 /// `state_capacity`, so no create can reach the desktop list's own cut.
 const STORE_MAX: usize = 128;
 
-const _: () = assert!(STORE_MAX < LIST_MAX && STORE_MAX % PAGE_SIZE as usize == 0);
+const _: () = assert!(STORE_MAX < LIST_MAX && STORE_MAX.is_multiple_of(PAGE_SIZE as usize));
 
 /// Creates one project with no repositories through the engine's wire socket. Inputs: the
 /// engine folder and the project id. Output: nothing, or the engine error.
