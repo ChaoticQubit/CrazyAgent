@@ -1,6 +1,7 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
 use base64::Engine;
 use kernel_processes::run::InstallError;
+use kernel_sandbox::engine_scratch::EngineScratch;
 use kernel_sandbox::error::SandboxError;
 use os::{
     NODE, lock, lock_shared, npm_ready, open_plain, private_folder, run_command, run_quiet,
@@ -237,6 +238,22 @@ pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, Instal
     result.map(|()| folder)
 }
 
+/// Makes a fresh staging folder for an install in its parent in the engine folder, named
+/// with a random suffix and never reused: the scratch the install's npm runs in. Inputs:
+/// the engine folder, the parent folder and a name prefix. Output: the scratch, or
+/// `setup_store_unavailable`.
+pub(super) fn staged_folder(
+    root: &Path,
+    parent: &Path,
+    prefix: &str,
+) -> Result<EngineScratch, InstallError> {
+    let unavailable = InstallError("setup_store_unavailable");
+    private_folder(parent)?;
+    let random = crate::engine::owner::random_id().map_err(|_| unavailable)?;
+    crate::sandbox::engine_scratch(root, parent, &format!(".{prefix}-{}", &random[..24]))
+        .map_err(|_| unavailable)
+}
+
 fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), InstallError> {
     let parent = folder
         .parent()
@@ -244,7 +261,7 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
     let prefix = format!("{PACKAGE}@{version}");
     clear(folder)?;
     remove_staged(parent, &prefix, version);
-    let staged = staging_folder(parent, &prefix)?;
+    let staged = staged_folder(root, parent, &prefix)?;
     let work = work_folder(&staged, &prefix);
     let result = work.and_then(|work| {
         let filled = npm_job(&staged, &work)
@@ -259,14 +276,14 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
                 })
             })
             .and_then(|()| {
-                std::fs::rename(&staged, folder)
+                std::fs::rename(staged.path(), folder)
                     .map_err(|_| InstallError("setup_store_unavailable"))
             });
         let _ = std::fs::remove_dir_all(&work);
         filled
     });
     if result.is_err() {
-        let _ = std::fs::remove_dir_all(&staged);
+        let _ = std::fs::remove_dir_all(staged.path());
     }
     result
 }
@@ -445,15 +462,16 @@ fn node_command(
     use kernel_sandbox::profile::installed::InstalledSandbox;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
-    let mut folders = Vec::with_capacity(3);
-    for name in ["project", "home", "tmp"] {
+    let project = crate::sandbox::engine_scratch(root, scratch, "project").map_err(refused)?;
+    let mut folders = vec![project.to_path_buf()];
+    for name in ["home", "tmp"] {
         private_folder(&scratch.join(name))?;
         folders.push(canonical(&scratch.join(name))?);
     }
     let homes = ToolHomes::owner().map_err(refused)?;
-    let sandbox = ProjectSandbox::new(
+    let sandbox = ProjectSandbox::in_engine_scratch(
         &crate::sandbox::PROFILE_HOOKS,
-        &folders[0],
+        &project,
         &folders[1],
         &folders[2],
         SandboxNetwork::Only(Vec::new()),
@@ -736,7 +754,7 @@ fn boundary_refused(bin: &Path, error: SandboxError) -> InstallError {
 /// re-checks before the rename.
 fn fill(
     root: &Path,
-    staged: &Path,
+    staged: &EngineScratch,
     work: &Path,
     bin: &Path,
     version: &str,
@@ -746,7 +764,7 @@ fn fill(
     command
         .arg("install")
         .arg("--prefix")
-        .arg(staged)
+        .arg(staged.as_os_str())
         .args([
             "--no-audit",
             "--no-fund",
@@ -777,7 +795,7 @@ fn npm_profile(parent: &Path, version: &str) -> PathBuf {
 /// the command, or the refusal.
 fn npm_command(
     root: &Path,
-    staged: &Path,
+    staged: &EngineScratch,
     work: &Path,
     bin: &Path,
     version: &str,
@@ -793,9 +811,9 @@ fn npm_command(
     private_folder(&tmp)?;
     let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let homes = ToolHomes::owner().map_err(refused)?;
-    let sandbox = ProjectSandbox::new(
+    let sandbox = ProjectSandbox::in_engine_scratch(
         &crate::sandbox::PROFILE_HOOKS,
-        &canonical(staged)?,
+        staged,
         &canonical(&home)?,
         &canonical(&tmp)?,
         os::npm_network(),
@@ -810,7 +828,7 @@ fn npm_command(
         .allow_node_for(&canonical(&bin.join("npm"))?)
         .map_err(refused)?;
     let profile = npm_profile(parent, version);
-    os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
+    os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged.path())?)
 }
 
 #[cfg(all(test, unix))]

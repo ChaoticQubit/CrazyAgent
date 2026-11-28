@@ -298,6 +298,7 @@ pub struct ProjectSandbox {
     project_secrets: Option<PathBuf>,
     secrets_revealed: Vec<PathBuf>,
     shared_writes: Vec<PathBuf>,
+    scratch_engine: Option<PathBuf>,
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
     owner_config: bool,
@@ -365,6 +366,7 @@ impl ProjectSandbox {
             project_root: project_root.to_path_buf(),
             agent_home: agent_home.to_path_buf(),
             agent_tmp: agent_tmp.to_path_buf(),
+            scratch_engine: None,
             worktrees: Vec::new(),
             read_roots: Vec::new(),
             tool_roots: Vec::new(),
@@ -646,12 +648,35 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Builds a sandbox as [`ProjectSandbox::new`] does whose project root is a scratch folder
+    /// the engine made in its own engine folder for this run: the one project root the guard
+    /// of that same engine folder lets sit in it. Inputs: the hooks, the scratch, the agent's
+    /// home and temp and the network. Output: the sandbox, or `Invalid`.
+    pub fn in_engine_scratch(
+        hooks: &'static ProfileHooks,
+        scratch: &crate::engine_scratch::EngineScratch,
+        agent_home: &Path,
+        agent_tmp: &Path,
+        network: SandboxNetwork,
+    ) -> Result<Self, SandboxError> {
+        let mut sandbox = Self::new(hooks, scratch.path(), agent_home, agent_tmp, network)?;
+        sandbox.scratch_engine = Some(scratch.engine().to_path_buf());
+        Ok(sandbox)
+    }
+
     /// Refuses a sandbox whose project folder equals or sits in the engine folder, judged by
     /// entry so another spelling or a link on the way counts too: its agents could write the
-    /// engine's own state there. Only the project folder is judged, never the agent's own
-    /// home and temp, which may sit in the engine folder. Input: the canonical engine folder.
-    /// Output: unit, or `Invalid` with [`crate::lines::project_in_engine_line`].
+    /// engine's own state there. A scratch made in this same engine folder, judged by entry,
+    /// is the one exception; the agent's home and temp are never judged. Input: the canonical
+    /// engine folder. Output: unit, or `Invalid` with [`crate::lines::project_in_engine_line`].
     fn project_clear_of_engine(&self, engine: &Path) -> Result<(), SandboxError> {
+        if let Some(made_in) = &self.scratch_engine
+            && sits_in_folder(made_in, engine)?
+            && sits_in_folder(engine, made_in)?
+        {
+            assert!(sits_in_folder(&self.project_root, engine)?);
+            return Ok(());
+        }
         if sits_in_folder(&self.project_root, engine)? {
             return Err(invalid(&project_in_engine_line(engine)));
         }

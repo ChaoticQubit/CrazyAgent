@@ -259,7 +259,7 @@ fn a_node_probe_leaves_a_scratch_alone_while_another_probe_holds_the_check_lock(
 fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
     let case = case("/usr/bin/false");
     let prefix = format!("context-mode@{VERSION}");
-    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let staged = staged_folder(&case.root, &case.npm(), &prefix).unwrap();
     let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
     assert_eq!(random.len(), 24);
     let work = work_folder(&staged, &prefix).unwrap();
@@ -399,7 +399,7 @@ fn npm_starts_under_the_install_sandbox_profile() {
     let bin = system_bin();
     let case = case("/usr/bin/false");
     let prefix = format!("context-mode@{VERSION}");
-    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let staged = staged_folder(&case.root, &case.npm(), &prefix).unwrap();
     let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
     let mut command = npm_command(&case.root, &staged, &work, &bin, VERSION).unwrap();
     command.arg("--version");
@@ -470,7 +470,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     let case = case("/usr/bin/false");
     case.store();
     let name = format!("context-mode@{VERSION}");
-    let staged = staging_folder(&case.npm(), &name).unwrap();
+    let staged = staged_folder(&case.root, &case.npm(), &name).unwrap();
     let work = staging_folder(&case.npm(), &format!("{name}-work")).unwrap();
     let npm = || {
         let mut command = npm_command(&case.root, &staged, &work, &bin, VERSION).unwrap();
@@ -572,7 +572,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
         )
     };
     let name = format!("context-mode@{VERSION}");
-    let staged = staging_folder(&npm, &name).unwrap();
+    let staged = staged_folder(&root, &npm, &name).unwrap();
     let work = staging_folder(&npm, &format!("{name}-work")).unwrap();
     let npm_version = || {
         let mut command = npm_command(&root, &staged, &work, &bin, VERSION).unwrap();
@@ -603,7 +603,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
 fn npm_starts_through_the_same_launcher_as_the_node_check() {
     let case = case("/usr/bin/false");
     let prefix = format!("context-mode@{VERSION}");
-    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let staged = staged_folder(&case.root, &case.npm(), &prefix).unwrap();
     let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
     let scratch = staging_folder(&case.npm(), NODE_CHECK).unwrap();
     let program = |built: Result<std::process::Command, InstallError>| {
@@ -692,7 +692,7 @@ fn no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_aga
     let bin = system_bin();
     let case = case("/usr/bin/false");
     let prefix = format!("context-mode@{VERSION}");
-    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let staged = staged_folder(&case.root, &case.npm(), &prefix).unwrap();
     let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
     let packing = work.join("tmp");
     private_folder(&packing).unwrap();
@@ -1278,7 +1278,7 @@ fn the_node_check_and_npm_refuse_under_stored_strict_when_linux_cannot_hold_full
             ..SandboxSettings::default()
         };
         crate::sandbox_settings::save(&connection, &settings).unwrap();
-        let staged = staging_folder(&case.npm(), &prefix).unwrap();
+        let staged = staged_folder(&case.root, &case.npm(), &prefix).unwrap();
         let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
         let scratch = staging_folder(&case.npm(), NODE_CHECK).unwrap();
         (

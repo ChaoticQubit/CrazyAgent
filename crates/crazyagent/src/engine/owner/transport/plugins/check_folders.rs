@@ -1,4 +1,5 @@
 use super::{CHECKS_MAX, EngineError, failure};
+use kernel_sandbox::engine_scratch::EngineScratch;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -30,16 +31,21 @@ pub(super) struct CheckOf {
 }
 
 impl CheckOf {
-    /// Counts a check of `id` as running. Inputs: the server id and the engine's check
-    /// folder, with a check slot held. Output: the count, ended when dropped.
-    pub(super) fn take(id: &str, checks: PathBuf, _slot: &CheckSlot) -> Self {
+    /// Counts a check of `id` as running, one at a time per server, so a check never clears
+    /// the fresh check folder another check of the same server runs in. Inputs: the server
+    /// id and the engine's check folder, with a check slot held. Output: the count, ended
+    /// when dropped, or `server_check_busy` while another check of `id` runs.
+    pub(super) fn take(id: &str, checks: PathBuf, _slot: &CheckSlot) -> Result<Self, EngineError> {
         let mut checking = checking();
+        if checking.running.iter().any(|running| running == id) {
+            return Err(failure("server_check_busy"));
+        }
         checking.running.push(id.to_owned());
         assert!(checking.running.len() <= CHECKS_MAX);
-        Self {
+        Ok(Self {
             id: id.to_owned(),
             checks,
-        }
+        })
     }
 }
 
@@ -133,4 +139,63 @@ impl Drop for CheckSlot {
         let before = CHECKS.fetch_sub(1, Ordering::SeqCst);
         assert!(before > 0);
     }
+}
+
+/// Makes a server's check folders fresh for one check: its project folder is the engine
+/// scratch made new in `<checks>/<id>`, after the last check's one is cleared, and its home
+/// and temp folders are the plain private folders the engine made there. Inputs: the engine
+/// folder, its check folder and the server id. Output: the project and the home and temp
+/// folders, or the cause of the refusal.
+pub(super) fn fresh_check_folders(
+    root: &Path,
+    checks: &Path,
+    id: &str,
+) -> Result<(EngineScratch, [PathBuf; 2]), String> {
+    let cause = |error: &dyn std::fmt::Display| error.to_string();
+    let [project, home, tmp] =
+        crate::storage::plugins::check_sandbox_folders(checks, id).map_err(|e| cause(&e))?;
+    let place = project
+        .parent()
+        .ok_or("check folder has no server folder")?;
+    let mut private = std::fs::DirBuilder::new();
+    private.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
+    private.create(place).map_err(|e| cause(&e))?;
+    clear_check_project(&project).map_err(|e| cause(&e))?;
+    let made = crate::sandbox::engine_scratch(root, place, "project").map_err(|e| cause(&e))?;
+    let plain = "check folder is not the plain folder the engine made";
+    if made.path() != project {
+        return Err(plain.into());
+    }
+    for folder in [&home, &tmp] {
+        private.create(folder).map_err(|e| cause(&e))?;
+        if kernel_sandbox::paths::canonical(folder).map_err(|e| cause(&e))? != *folder {
+            return Err(plain.into());
+        }
+    }
+    Ok((made, [home, tmp]))
+}
+
+/// Clears the project folder a server's last check left, so each check runs in a fresh
+/// one: only a real folder owned by this user is removed, never through a link, and a
+/// missing one is left as it is. Input: the check's project folder. Output: unit, or the
+/// error naming why it was not removed.
+pub(super) fn clear_check_project(project: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(project) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    #[cfg(unix)]
+    let owned =
+        std::os::unix::fs::MetadataExt::uid(&metadata) == rustix::process::geteuid().as_raw();
+    #[cfg(not(unix))]
+    let owned = true;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || !owned {
+        return Err(std::io::Error::other(
+            "check project folder is not one the engine made",
+        ));
+    }
+    std::fs::remove_dir_all(project)
 }

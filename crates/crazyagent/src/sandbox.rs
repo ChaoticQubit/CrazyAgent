@@ -374,6 +374,33 @@ fn access_owner_git(root: &Path) -> Result<Option<std::process::Command>, ()> {
     }
 }
 
+/// Makes a scratch folder the engine owns for one run: a new private folder `name` in
+/// `folder`, which must sit in the engine folder
+/// ([`kernel_sandbox::engine_scratch::EngineScratch::make`]). Inputs: the engine folder,
+/// the folder in it and the new name. Output: the scratch, or `Invalid` when the folder is
+/// not in the engine folder or the make refuses.
+pub(crate) fn engine_scratch(
+    engine: &Path,
+    folder: &Path,
+    name: &str,
+) -> Result<kernel_sandbox::engine_scratch::EngineScratch, kernel_sandbox::error::SandboxError> {
+    let engine = kernel_sandbox::paths::canonical(engine)?;
+    let folder = kernel_sandbox::paths::canonical(folder)?;
+    let parts = folder
+        .strip_prefix(&engine)
+        .ok()
+        .and_then(|inside| {
+            inside
+                .iter()
+                .map(|part| part.to_str())
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| {
+            kernel_sandbox::error::invalid("engine scratch parent is not in the engine folder")
+        })?;
+    kernel_sandbox::engine_scratch::EngineScratch::make(&PROFILE_HOOKS, &engine, &parts, name)
+}
+
 /// The folders and files in the owner's home that belong to a harness, as every harness
 /// manifest names them, in catalog order: agents never read them and no project or sandbox
 /// root may sit inside one. Takes nothing. Returns the names, relative to the home.

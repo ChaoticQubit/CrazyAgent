@@ -675,7 +675,7 @@ async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends()
         std::fs::create_dir_all(checks.join(id).join("home")).unwrap();
     }
     let slot = CheckSlot::take().unwrap();
-    let counted = CheckOf::take(ID, checks.clone(), &slot);
+    let counted = CheckOf::take(ID, checks.clone(), &slot).unwrap();
     removed_server_checks(&checks, IDLE);
     assert!(!checks.join(IDLE).exists());
     removed_server_checks(&checks, ID);
@@ -686,4 +686,67 @@ async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends()
     assert!(!check_folders::checking().removed.contains(&ID.to_owned()));
     assert!(!check_folders::checking().running.contains(&ID.to_owned()));
     drop(slot);
+}
+
+/// A second check of a server whose check runs is refused as busy and leaves the running
+/// check's folder as it is, so a check never clears the fresh folder another one runs in.
+#[tokio::test]
+async fn a_second_check_of_a_running_server_is_busy_and_leaves_its_folder() {
+    const ID: &str = "mcp-0123456789abcdef0123456b";
+    let directory = tempfile::tempdir().unwrap();
+    let checks = directory.path().join(CHECK_FOLDER);
+    let project = checks.join(ID).join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("running"), "kept\n").unwrap();
+    let slot = CheckSlot::take().unwrap();
+    let first = CheckOf::take(ID, checks.clone(), &slot).unwrap();
+    let second = CheckOf::take(ID, checks.clone(), &slot);
+    assert_eq!(
+        second.err().map(|error| error.0).as_deref(),
+        Some("server_check_busy")
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("running")).unwrap(),
+        "kept\n"
+    );
+    drop(first);
+    drop(slot);
+}
+
+/// A check that ends in an error frees its server at once, so the next check of it runs
+/// instead of reading busy.
+#[tokio::test]
+async fn a_failed_check_frees_its_server_for_the_next_check() {
+    const ID: &str = "mcp-0123456789abcdef0123456c";
+    let directory = tempfile::tempdir().unwrap();
+    let checks = directory.path().join(CHECK_FOLDER);
+    let slot = CheckSlot::take().unwrap();
+    let failed: Result<(), EngineError> = CheckOf::take(ID, checks.clone(), &slot)
+        .and_then(|_counted| Err(EngineError("server_cant_start".into())));
+    assert!(failed.is_err());
+    assert!(!check_folders::checking().running.contains(&ID.to_owned()));
+    let next = CheckOf::take(ID, checks.clone(), &slot);
+    assert!(next.is_ok());
+    drop(next);
+    drop(slot);
+}
+
+/// A link planted where a check's project folder goes is refused, never followed, so
+/// clearing the last check's folder never deletes what the link points at.
+#[cfg(unix)]
+#[test]
+fn a_planted_link_at_a_check_project_folder_is_refused_and_not_followed() {
+    let directory = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("owner-file"), "owner\n").unwrap();
+    let project = directory.path().join("project");
+    std::os::unix::fs::symlink(elsewhere.path(), &project).unwrap();
+    assert!(check_folders::clear_check_project(&project).is_err());
+    assert!(elsewhere.path().join("owner-file").is_file());
+    assert!(
+        std::fs::symlink_metadata(&project)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }

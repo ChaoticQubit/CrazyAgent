@@ -329,7 +329,7 @@ fn local_tarball(folder: &Path) -> PathBuf {
 /// the staging and work folders, npm's folder and the tarball. Output: npm's exit and output.
 fn install_output(
     case: &Case,
-    staged: &Path,
+    staged: &EngineScratch,
     work: &Path,
     bin: &Path,
     tarball: &Path,
@@ -338,7 +338,7 @@ fn install_output(
     command
         .arg("install")
         .arg("--prefix")
-        .arg(staged)
+        .arg(staged.as_os_str())
         .args([
             "--no-audit",
             "--no-fund",
@@ -391,7 +391,7 @@ fn the_npm_staging_folder_holds_no_project_guards() {
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
     let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     assert_eq!(staged.parent(), Some(npm.as_path()));
     npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
     let loaded = BoundaryProfile::load(&npm.join(format!("{prefix}.sb"))).unwrap();
@@ -426,7 +426,7 @@ fn npm_installs_into_a_fresh_staging_folder() {
     let packing = work.join("tmp");
     private_folder(&packing).unwrap();
     let tarball = local_tarball(&packing);
-    let bare = staging_folder(&npm, &prefix).unwrap();
+    let bare = staged_folder(&case.root, &npm, &prefix).unwrap();
     assert!(!bare.join(MODULES).exists());
     let installed = install_output(&case, &bare, &work, &bin, &tarball);
     assert!(
@@ -440,7 +440,7 @@ fn npm_installs_into_a_fresh_staging_folder() {
         checked(&bare, VERSION),
         Err("context_mode_integrity_mismatch")
     );
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     assert!(!staged.join(MODULES).exists());
     assert_eq!(
         fill(
@@ -475,7 +475,7 @@ fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
     let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     let source = OsStr::new("context-mode.tgz");
     assert_eq!(
         fill(&case.root, &staged, &work, &bin, VERSION, source),
@@ -618,7 +618,7 @@ fn the_release_takes_back_what_the_npm_job_was_granted() {
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
     let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     let before = entries(&staged);
     let job = kernel_sandbox::paths::canonical(&staged).unwrap();
     let home = kernel_sandbox::paths::canonical(&work)
@@ -753,7 +753,7 @@ fn an_npm_install_releases_the_container_a_crashed_install_left() {
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
     let before = entries(&case.bin);
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
     let work = npm.join(format!(".{prefix}-work-{random}"));
     fs::create_dir(&work).unwrap();
@@ -786,7 +786,7 @@ fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
     let case = case();
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
     let work = work_folder(&staged, &prefix).unwrap();
     assert_eq!(work, npm.join(format!(".{prefix}-work-{random}")));
@@ -805,7 +805,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
     let case = case();
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
-    let staged = staging_folder(&npm, &prefix).unwrap();
+    let staged = staged_folder(&case.root, &npm, &prefix).unwrap();
     let work = work_folder(&staged, &prefix).unwrap();
     let (job, home) = npm_job(&staged, &work).unwrap();
     let tmp = kernel_sandbox::paths::canonical(&work).unwrap().join("tmp");

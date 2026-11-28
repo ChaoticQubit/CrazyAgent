@@ -6,6 +6,9 @@ pub mod access;
 /// built from this crate's runner, keeper, pane shim and variable gate.
 #[cfg(unix)]
 mod confinement;
+/// The fresh private folders the engine makes in its own engine folder for one run, the only
+/// project roots a sandbox may have there.
+pub mod engine_scratch;
 #[cfg(unix)]
 pub use confinement::confinement;
 /// The Seatbelt profile an IDE server runs under: its grants, the profile built over the

@@ -2137,11 +2137,10 @@ impl ResearchRunner {
                 None
             }
         };
-        let work = agent.join("work");
-        private_directory(&work)?;
+        let work = crate::sandbox::engine_scratch(self.engine_folder()?, &agent, "work")?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let mut sandbox = ProjectSandbox::new(
+        let mut sandbox = ProjectSandbox::in_engine_scratch(
             &crate::sandbox::PROFILE_HOOKS,
             &work,
             &home,

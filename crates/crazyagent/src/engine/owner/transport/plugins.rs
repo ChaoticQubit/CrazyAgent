@@ -1368,7 +1368,7 @@ async fn start_check(
 ) -> Result<Reply, EngineError> {
     let slot = CheckSlot::take()?;
     let root = engine_root(authority)?;
-    let counted = CheckOf::take(&id, root.join(CHECK_FOLDER), &slot);
+    let counted = CheckOf::take(&id, root.join(CHECK_FOLDER), &slot)?;
     let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
@@ -1456,8 +1456,8 @@ fn boundary_check(
     network: kernel_sandbox::net::SandboxNetwork,
 ) -> Result<Vec<String>, String> {
     use kernel_sandbox::error::SandboxError;
+    use kernel_sandbox::profile::ProjectSandbox;
     use kernel_sandbox::profile::installed::InstalledSandbox;
-    use kernel_sandbox::{paths::canonical, profile::ProjectSandbox};
     assert!(valid_id(id));
     use crate::context_mode::ForCheck;
     let approved = ServerSpec::Stdio {
@@ -1547,14 +1547,8 @@ fn boundary_check(
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
     private.create(&checks).map_err(|error| refused(&error))?;
-    let folders = crate::storage::plugins::check_sandbox_folders(&checks, id)
-        .map_err(|error| refused(&error))?;
-    for folder in &folders {
-        private.create(folder).map_err(|error| refused(&error))?;
-        if canonical(folder).map_err(|error| refused(&error))? != *folder {
-            return Err(refused(&"check folder is not the plain folder the engine made").into());
-        }
-    }
+    let (project, folders) =
+        check_folders::fresh_check_folders(root, &checks, id).map_err(|cause| refused(&cause))?;
     let profiles = checks.join(CHECK_PROFILES);
     private.create(&profiles).map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
@@ -1573,11 +1567,11 @@ fn boundary_check(
         eprintln!("plugin_check_boundary_refused cause=windows_network_limit");
         return Err(problem);
     }
-    let sandbox = ProjectSandbox::new(
+    let sandbox = ProjectSandbox::in_engine_scratch(
         &crate::sandbox::PROFILE_HOOKS,
+        &project,
         &folders[0],
         &folders[1],
-        &folders[2],
         network,
     )
     .map(ProjectSandbox::as_job_folder)
@@ -1591,7 +1585,7 @@ fn boundary_check(
     .and_then(|sandbox| InstalledSandbox::install(sandbox, &profile, calls, strict))
     .map_err(boundary)?;
     let mut server = std::process::Command::new(program);
-    server.args(args).current_dir(&folders[0]);
+    server.args(args).current_dir(project.path());
     let mut process = sandbox.wrap(&server).map_err(boundary)?;
     for (name, value) in secrets {
         process.env(name, check::env_value(value)?);

@@ -173,3 +173,48 @@ fn a_project_folder_linked_into_the_engine_root_is_refused() {
         Some("project_in_engine_folder")
     );
 }
+
+/// A scratch the engine made in its own engine folder is the one project root its guard
+/// lets sit there, while the same folder built as a plain project root is refused, so only
+/// a folder the engine made for the run becomes a project root inside the engine folder.
+#[test]
+fn an_engine_scratch_passes_its_own_guard_and_the_same_folder_as_a_plain_root_does_not() {
+    let (_scratch, root) = engine_root();
+    let (home, tmp) = agent_folders(&root);
+    let made = crate::engine_scratch::EngineScratch::make(
+        &STAND_IN,
+        &root,
+        &["research", "agents", "run"],
+        "work",
+    )
+    .unwrap();
+    let network = super::SandboxNetwork::Only(Vec::new());
+    let guarded = super::ProjectSandbox::in_engine_scratch(&STAND_IN, &made, &home, &tmp, network)
+        .and_then(|sandbox| sandbox.guard_engine(&root));
+    assert!(guarded.is_ok(), "{:?}", guarded.err());
+    assert_eq!(
+        guarded_code(made.path(), &home, &tmp, &root),
+        Some("project_in_engine_folder")
+    );
+}
+
+/// A scratch made in a runtime folder is refused when guarded against the wider engine
+/// root around it: the exemption holds only for the engine folder it was made in.
+#[test]
+fn an_engine_scratch_guarded_against_another_engine_folder_is_refused() {
+    let (_scratch, outer) = engine_root();
+    let runtime = outer.join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(runtime.join("engine.db"), "engine secret\n").unwrap();
+    let (home, tmp) = agent_folders(&outer);
+    let made = crate::engine_scratch::EngineScratch::make(&STAND_IN, &runtime, &["setup"], "check")
+        .unwrap();
+    let network = super::SandboxNetwork::Only(Vec::new());
+    let refused = super::ProjectSandbox::in_engine_scratch(&STAND_IN, &made, &home, &tmp, network)
+        .and_then(|sandbox| sandbox.guard_engine(&runtime))
+        .and_then(|sandbox| sandbox.guard_engine_around(&outer, &runtime))
+        .err()
+        .map(|error| crate::lines::invalid_code(&error));
+    assert_eq!(refused, Some("project_in_engine_folder"));
+}
