@@ -1,4 +1,5 @@
 use crate::error::StoreError;
+use crate::secret::HEX_DIGITS;
 use kernel_common::relay_names::{TOKEN_HEX, TOKEN_PREFIX, is_relay_token};
 use subtle::ConstantTimeEq;
 
@@ -12,8 +13,7 @@ impl RelayToken {
     pub fn mint() -> Result<Self, StoreError> {
         let mut bytes = [0_u8; TOKEN_HEX / 2];
         getrandom::fill(&mut bytes).map_err(|_| StoreError::code("model_relay_unavailable"))?;
-        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let token = format!("{TOKEN_PREFIX}{hex}");
+        let token = encoded(&bytes);
         assert!(is_relay_token(&token));
         Ok(Self(token))
     }
@@ -28,6 +28,20 @@ impl RelayToken {
     pub fn matches(&self, presented: &str) -> bool {
         bool::from(presented.as_bytes().ct_eq(self.0.as_bytes()))
     }
+}
+
+/// Writes `crazyagent-relay-` and two lowercase hex digits per random byte into one buffer
+/// of exactly the token's length, so minting makes one allocation. Input: the random bytes.
+/// Output: the token text.
+fn encoded(bytes: &[u8; TOKEN_HEX / 2]) -> String {
+    let mut token = String::with_capacity(TOKEN_PREFIX.len() + TOKEN_HEX);
+    token.push_str(TOKEN_PREFIX);
+    for &byte in bytes {
+        token.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        token.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    assert_eq!(token.len(), TOKEN_PREFIX.len() + TOKEN_HEX);
+    token
 }
 
 #[cfg(test)]
