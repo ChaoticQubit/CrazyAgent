@@ -634,3 +634,19 @@ fn an_owner_home_moved_into_a_granted_root_after_the_build_is_refused_at_install
         other => panic!("{other:?}"),
     }
 }
+
+/// A grant checked against a list that leaves out a harness home trips the build's
+/// assertion, since the install would then not judge that home again.
+#[cfg(unix)]
+#[test]
+#[should_panic(expected = "a grant is checked against every harness home")]
+fn a_grant_against_a_list_without_a_harness_home_trips_the_build() {
+    let (folder, home, secrets) = secret_home();
+    let root = canonical(folder.path()).unwrap().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let without: Vec<PathBuf> = secrets
+        .into_iter()
+        .filter(|secret| *secret != home.join(".claude"))
+        .collect();
+    let _ = granted_build(&home, &without, &root);
+}

@@ -774,9 +774,17 @@ impl Kept {
 
     /// Checks a root by the rules of [`granted_root`] against `secrets`, walking only the
     /// root, or reusing its walk when this build checked it already, and any of `secrets`
-    /// not walked yet, then keeps the root. Inputs: the root and the secret paths. Output:
-    /// unit, or `Invalid` naming the rule, keeping nothing.
+    /// not walked yet, then keeps the root. `secrets` must hold every harness home, so the
+    /// install's [`Kept::recheck`] judges them again. Inputs: the root and the secret
+    /// paths. Output: unit, or `Invalid` naming the rule, keeping nothing.
     pub(crate) fn grant(&mut self, root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
+        assert!(
+            self.walked
+                .harnesses
+                .iter()
+                .all(|home| secrets.contains(&home.path)),
+            "a grant is checked against every harness home"
+        );
         deep_plain(root)?;
         self.walk_secrets(secrets)?;
         let walk = self.walk_of(root)?;
