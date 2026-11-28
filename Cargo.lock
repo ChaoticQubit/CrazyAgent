@@ -1021,6 +1021,7 @@ dependencies = [
  "crazyagent-kernel-common",
  "crazyagent-macos-fs",
  "crazyagent-win-sandbox",
+ "dunce",
  "getrandom 0.4.3",
  "minisign",
  "minisign-verify",

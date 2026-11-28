@@ -2,8 +2,9 @@ pub mod permission_fix;
 /// The methods of [`Places`]: how the places are built, which folders they keep and which
 /// paths agents can write.
 mod places;
-pub use places::npm_shims;
+pub use places::{in_temp_of, npm_shims, temp_roots};
 pub mod probe;
+mod script;
 #[cfg(test)]
 pub(crate) mod stub;
 #[cfg(any(test, feature = "test-support"))]
@@ -493,42 +494,11 @@ fn under_temp(hooks: &FindingHooks, path: &Path, temps: &[PathBuf]) -> bool {
         .any(|temp| path.starts_with(temp) || short.starts_with(temp))
 }
 
-/// The temp folders: the shared ones and this user's own, as given, with its links resolved
-/// and in the plain form [`FindingHooks::canonical`] gives (a Windows drive path without
-/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Input: the hooks. Output: the absolute folders, each once.
-pub fn temp_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
-    let owner = std::env::temp_dir();
-    let real = owner.canonicalize().ok();
-    let plain = (hooks.canonical)(&owner).ok();
-    let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-    for root in std::iter::once(owner).chain(real).chain(plain) {
-        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
-    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
-    roots
-}
-
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
 /// resolved. Inputs: the hooks and the folder. Output: the answer.
 fn in_temp(hooks: &FindingHooks, folder: &Path) -> bool {
     in_temp_of(hooks, folder, &temp_roots(hooks))
-}
-
-/// Whether a folder is in one of the temp folders given, as written and with its links
-/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the hooks, the
-/// folder and the temp folders. Output: the answer.
-pub fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> bool {
-    if temps.is_empty() {
-        return false;
-    }
-    let real = folder.canonicalize().ok();
-    std::iter::once(folder)
-        .chain(real.as_deref())
-        .any(|folder| under_temp(hooks, folder, temps))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -542,8 +512,14 @@ pub enum Kind {
         interpreter: Box<Resolved>,
         arguments: Vec<String>,
         by_name: bool,
+        word: ScriptWord,
     },
 }
+
+/// The word a script's interpreter is handed for it, made only by [`Resolved::script`], so no
+/// script holds a word its interpreter cannot start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptWord(OsString);
 
 /// One tool the resolver found: the entry as found, the real file it names and how it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -573,11 +549,12 @@ impl Resolved {
             Kind::Script {
                 interpreter,
                 arguments,
+                word,
                 ..
             } => {
                 let mut words = interpreter.argv();
                 words.extend(arguments.iter().map(OsString::from));
-                words.push(self.program.clone().into_os_string());
+                words.push(word.0.clone());
                 words
             }
         };
@@ -632,8 +609,9 @@ impl Reason {
 /// with no real install found behind it, or a file in a temp folder the engine's places
 /// refuse or reached through a link into one, which agents with the owner's temp folder
 /// grant or other users write, a script whose first line the resolver cannot read the
-/// way the system and `/usr/bin/env` run it, or a Windows batch file that is neither an npm
-/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe.
+/// way the system and `/usr/bin/env` run it, a Windows batch file that is neither an npm
+/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe, or a Windows
+/// script whose real file only a verbatim `\\?\` path names, which Node cannot start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
@@ -642,6 +620,7 @@ pub enum Refusal {
     InTemp,
     FirstLine,
     Batch,
+    Verbatim,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -998,15 +977,16 @@ pub(crate) fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Re
     if real_name.is_some_and(launches_by_name) || launches_by_name(&interpreter_name) {
         return Err(refused(program.as_path(), Refusal::FirstLine));
     }
-    Ok(Resolved {
-        entry: entry.to_path_buf(),
-        program,
-        kind: Kind::Script {
-            interpreter: Box::new(interpreter),
-            arguments: shebang.arguments,
-            by_name: shebang.by_name.is_some() || through_shim,
-        },
-    })
+    let by_name = shebang.by_name.is_some() || through_shim;
+    let entry = entry.to_path_buf();
+    Resolved::script(
+        entry,
+        program.clone(),
+        interpreter,
+        shebang.arguments,
+        by_name,
+    )
+    .map_err(|why| refused(program.as_path(), why))
 }
 
 /// A step a row runs once in `entry_at` between reading an entry's real file and checking
@@ -1393,6 +1373,9 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
         ),
         Refusal::Batch => format!(
             "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npm.cmd or npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
+        ),
+        Refusal::Verbatim => format!(
+            "{tool} can't start: {file} is not used because only a long-form Windows path can name it (a network share, a name such as CON or AUX, a name ending in a dot or a space, or a path that is too long), which Node.js can't start. Install it in a folder with a short, plain path, then try again."
         ),
     }
 }
