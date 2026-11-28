@@ -866,3 +866,28 @@ fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
         other => panic!("{other:?}"),
     }
 }
+
+/// The state a second grant would leave if it judged a swapped folder from the build's
+/// reads alone: the walk of a root under a folder swapped for a link into a secret, read
+/// through those reads so it still names the old folder, kept as a grant keeps it. The
+/// install's recheck alone refuses that build.
+#[cfg(unix)]
+#[test]
+fn a_stale_walk_kept_from_the_build_reads_is_refused_at_install() {
+    let (folder, home, secrets, x) = two_roots_under_one_folder();
+    let mut kept = granted_build(&home, &secrets, &x.join("a"));
+    let old_x = kept.checked[0].walk.ids[x.components().count() - 1];
+    std::fs::rename(&x, folder.path().join("x-old")).unwrap();
+    std::fs::create_dir_all(home.join(".ssh").join("b")).unwrap();
+    std::os::unix::fs::symlink(home.join(".ssh"), &x).unwrap();
+    let stale = Walk::read(&x.join("b"), &mut kept.walked.reads).unwrap();
+    assert_eq!(stale.ids[x.components().count() - 1], old_x);
+    kept.keep(stale, &secrets);
+    match kept.recheck() {
+        Err(SandboxError::Invalid(reason)) => assert!(
+            reason == GRANT_CHANGED || reason == SECRET_ROOT_REFUSED,
+            "{reason}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
