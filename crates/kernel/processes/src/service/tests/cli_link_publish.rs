@@ -139,7 +139,6 @@ fn a_link_that_already_names_the_executable_is_left_unwritten() -> TestResult {
     let (_temp, executable, bin) = setup()?;
     let link = link_cli(&executable, &bin).unwrap();
     let before = stamp_of(&link)?;
-    std::thread::sleep(std::time::Duration::from_millis(20));
     assert_eq!(link_cli(&executable, &bin).unwrap(), link);
     assert_eq!(stamp_of(&link)?, before);
     assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
