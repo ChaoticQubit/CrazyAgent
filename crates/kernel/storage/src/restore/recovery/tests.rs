@@ -151,6 +151,62 @@ fn put_back_refuses_while_another_holds_the_restore_lock_and_writes_nothing() {
     assert_eq!(untouched(root.path(), &path), before);
 }
 
+/// A second descriptor of the restore lock, as a process spawned while the lock is held
+/// carries until its exec. Input: the held lock. Output: the copy.
+fn spawned_copy(lock: &std::fs::File) -> std::fs::File {
+    lock.try_clone().unwrap()
+}
+
+#[test]
+fn a_copy_of_the_lock_left_in_a_spawned_process_does_not_keep_the_next_lock_out() {
+    let root = tempfile::tempdir().unwrap();
+    let lock = locked(root.path()).unwrap();
+    let copy = spawned_copy(&lock);
+    drop(lock);
+
+    let again = locked(root.path());
+
+    assert!(again.is_ok(), "{:?}", again.err());
+    drop(again);
+    drop(copy);
+}
+
+#[test]
+fn a_held_restore_lock_refuses_another_open_of_its_file() {
+    let root = tempfile::tempdir().unwrap();
+    let lock = locked(root.path()).unwrap();
+    let other = std::fs::File::open(root.path().join(RESTORE_LOCK_FILE)).unwrap();
+
+    let taken = rustix::fs::flock(&other, rustix::fs::FlockOperation::NonBlockingLockExclusive);
+
+    assert_eq!(taken, Err(rustix::io::Errno::WOULDBLOCK));
+    drop(lock);
+    rustix::fs::flock(&other, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+}
+
+#[test]
+fn a_held_restore_lock_is_busy_to_another_thread_until_it_is_dropped() {
+    let root = tempfile::tempdir().unwrap();
+    let lock = locked(root.path()).unwrap();
+
+    let refused = std::thread::scope(|scope| {
+        scope
+            .spawn(|| locked(root.path()).map(drop).unwrap_err().0)
+            .join()
+            .unwrap()
+    });
+
+    assert_eq!(refused, PUTBACK_BUSY);
+    drop(lock);
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| locked(root.path()).map(drop))
+            .join()
+            .unwrap()
+    })
+    .unwrap();
+}
+
 #[test]
 fn a_named_copy_that_fails_its_check_is_refused_before_any_write() {
     let (root, path, kept) = broken(true);
