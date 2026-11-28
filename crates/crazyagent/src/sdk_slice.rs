@@ -190,6 +190,7 @@ pub(crate) fn save_quit_with(
         editor: &editor,
         net: &crate::security_caps::Absent,
         process: &crate::sdk_install::InstallCaps::UNREGISTERED,
+        project_rows: &crate::security_caps::Absent,
         sandbox: &crate::security_caps::Absent,
         secrets: &crate::security_caps::Absent,
         settings: &provider,
@@ -222,9 +223,9 @@ pub(crate) fn save_quit_with(
 /// The refusal sink one call sees: it forwards each refusal to the engine sink and keeps
 /// whether the gateway refused anything in this call, so "refused" is the gateway's own
 /// record, never the variant the plugin returned.
-struct CallRecord<'s> {
-    sink: &'s EngineRefusals,
-    refused: Cell<bool>,
+pub(crate) struct CallRecord<'s> {
+    pub(crate) sink: &'s EngineRefusals,
+    pub(crate) refused: Cell<bool>,
 }
 
 impl Refusals for CallRecord<'_> {

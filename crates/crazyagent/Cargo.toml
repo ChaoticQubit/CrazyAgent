@@ -23,6 +23,7 @@ crazyagent-kernel-common = { path = "../kernel/common" }
 crazyagent-kernel-plugin-host = { path = "../kernel/plugin_host" }
 crazyagent-kernel-sandbox = { path = "../kernel/sandbox" }
 crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
+crazyagent-plugin-projects = { path = "../../plugins/t1/projects" }
 crazyagent-sdk = { path = "../sdk/rust" }
 crazyagent-sdk-host = { path = "../sdk/host" }
 crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }

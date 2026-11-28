@@ -98,7 +98,7 @@ fn the_permission_table_lists_every_capability() {
     assert!(flat.contains(
         "name:\"settings.save_quit\",tier:Tier::Kernel,needs:\"settings.write\",emits:&[\"AgentQuitSaved\"],"
     ));
-    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;1]"));
+    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;2]"));
     assert!(flat.contains(
         "plugin:\"agent-quit\",tier:Tier::T2,permissions:&[\"settings.write\"],essential:true,"
     ));
@@ -177,7 +177,7 @@ fn a_manifest_refusal_names_its_file_and_line() {
 }
 
 /// Every essential bundled code plugin is marked so in its own `plugin.toml`, and the
-/// generated table carries each file's mark: today exactly `agent-quit`.
+/// generated table carries each file's mark: exactly `agent-quit` and `projects`.
 #[test]
 fn every_essential_plugin_is_marked_in_its_plugin_file() {
     use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
@@ -186,7 +186,7 @@ fn every_essential_plugin_is_marked_in_its_plugin_file() {
         .filter(|grant| grant.essential)
         .map(|grant| grant.plugin)
         .collect();
-    assert_eq!(essential, ["agent-quit"]);
+    assert_eq!(essential, ["agent-quit", "projects"]);
     for grant in &BUNDLED_GRANTS {
         let dir = ["t1", "t2", "t3"]
             .iter()

@@ -1,0 +1,15 @@
+[package]
+name = "crazyagent-plugin-projects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+crazyagent-sdk = { path = "../../../crates/sdk/rust" }
+
+[build-dependencies]
+crazyagent-plugin-check = { path = "../../../crates/sdk/plugin_check" }

@@ -1,7 +1,9 @@
 use std::hint::black_box;
 
 use bus_gateway::{AllOn, Gateway, Grants, Refusals};
-use sdk::generated::{editor, net, process, sandbox, secrets, service, settings, update};
+use sdk::generated::{
+    editor, net, process, project_rows, sandbox, secrets, service, settings, update,
+};
 use sdk::{Capability, Refusal, Tier};
 
 use crate::perf_kit::{Row, SAMPLES, time};
@@ -9,10 +11,11 @@ use crate::{Bound, Providers};
 
 const BATCH: usize = 1000;
 const PLUGIN: &str = "perf";
-const PERMISSIONS: [&str; 12] = [
+const PERMISSIONS: [&str; 13] = [
     "editor.spawn",
     "net.request",
     "process.install",
+    "project_rows.read",
     "sandbox.settings_write",
     "sandbox.settings_read",
     "secrets.put",
@@ -56,6 +59,21 @@ impl editor::Provide for Noop {
     fn spawn(&self, _: &'static str, launch: editor::EditorLaunch) -> Result<u32, Refusal> {
         black_box(launch);
         Ok(PID)
+    }
+}
+
+impl project_rows::Provide for Noop {
+    fn page(
+        &self,
+        _: &'static str,
+        after: Option<String>,
+        limit: u16,
+    ) -> Result<project_rows::RowsPage, Refusal> {
+        black_box((after, limit));
+        Ok(project_rows::RowsPage {
+            rows: Vec::new(),
+            more: false,
+        })
     }
 }
 
@@ -210,7 +228,7 @@ fn recipe() -> process::InstallRecipe {
     }
 }
 
-/// Times each of the 14 capability calls through the generated host binding a plugin
+/// Times each of the 15 capability calls through the generated host binding a plugin
 /// holds, with a no-op provider, after checking each answer once. Owned inputs are built
 /// inside the timed step, so a row with a text input also holds that input's copy.
 /// Prints one PERF line per call and asserts no time.
@@ -223,6 +241,7 @@ fn capability_calls() {
         editor: &Noop,
         net: &Noop,
         process: &Noop,
+        project_rows: &Noop,
         sandbox: &Noop,
         secrets: &Noop,
         service: &Noop,
@@ -239,6 +258,13 @@ fn capability_calls() {
     assert_eq!(
         process::install(&host, recipe()).map(|done| done.code),
         Ok(0)
+    );
+    assert_eq!(
+        project_rows::page(&host, None, 16),
+        Ok(project_rows::RowsPage {
+            rows: Vec::new(),
+            more: false,
+        })
     );
     assert_eq!(
         sandbox::save_settings(&host, SANDBOX, SETTINGS_VERSION),
@@ -269,6 +295,9 @@ fn capability_calls() {
     });
     time(&row("bound.process.install"), SAMPLES, || {
         let _ = black_box(process::install(host, recipe()));
+    });
+    time(&row("bound.project_rows.page"), SAMPLES, || {
+        let _ = black_box(project_rows::page(host, None, black_box(16)));
     });
     time(&row("bound.sandbox.save_settings"), SAMPLES, || {
         let _ = black_box(sandbox::save_settings(

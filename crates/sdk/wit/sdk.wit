@@ -136,6 +136,26 @@ interface process {
   install: func(recipe: install-recipe) -> result<install-result, refusal>;
 }
 
+interface project-rows-types {
+  record project-row {
+    id: string,
+    name: string,
+    repository-count: u16,
+  }
+
+  record rows-page {
+    rows: list<project-row>,
+    more: bool,
+  }
+}
+
+interface project-rows {
+  use sdk-types.{refusal};
+  use project-rows-types.{rows-page};
+
+  page: func(after: option<string>, limit: u16) -> result<rows-page, refusal>;
+}
+
 interface sandbox-types {
   enum linux-sockets {
     tcp-only,
@@ -261,6 +281,7 @@ world plugin {
   import editor;
   import net;
   import process;
+  import project-rows;
   import sandbox;
   import secrets;
   import service;

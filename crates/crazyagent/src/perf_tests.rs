@@ -142,6 +142,7 @@ fn providers<'p>(
         editor: &Absent,
         net,
         process: &Absent,
+        project_rows: &Absent,
         sandbox,
         secrets,
         service,

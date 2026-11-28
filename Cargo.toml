@@ -16,6 +16,7 @@ members = [
     "crates/kernel/sandbox",
     "crates/kernel/plugin_host",
     "crates/sdk/plugin_check",
+    "plugins/t1/projects",
     "plugins/t2/agent-quit",
     "apps/desktop/src-tauri",
 ]
