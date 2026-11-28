@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { kindOf, testLines, testModules } from "./sleeps.mjs";
+import { body, COMMENT, functions, GUARD, masked, topGuards } from "./engine-guard-text.mjs";
 
 /** The allowlist of unguarded install functions, relative to the repository root. */
 export const ALLOWLIST = "scripts/quality/engine-guard-allow.json";
@@ -16,172 +17,17 @@ const LISTING_BYTES_MAX = 64 * 1024 * 1024;
 const SITE =
   /\.install(?:_with_grants)?\s*\(|\b(?:InstalledSandbox|WindowsSandbox)::install\w*\s*\(/g;
 
-/** A call that guards a sandbox against the engine root's secrets. */
-const GUARD = /\bguard_engine(?:_around)?\s*\(/;
-
 /** A file that names a sandbox type, the only files whose install calls are read. */
 const SANDBOX_FILE = /\b(?:ProjectSandbox|InstalledSandbox|WindowsSandbox)\b/;
 
 /** The most entries the allowlist may hold; it only shrinks, so this only comes down. */
 export const ALLOW_MAX = 8;
 
-/** A Rust function's first line; groups: indent, name. */
-const FN = /^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)/;
-
-/** A comment line, by its trimmed start. */
-const COMMENT = /^\s*(?:\/\/|\/\*|\*)/;
-
 /** An allowlist guard that names a function: `path.rs#name`; any other text is a reason. */
 const NAMED = /^([\w./-]+\.rs)#(\w+)$/;
 
 /** A function a reason names, `path.rs#name`, which must still exist for the reason to hold. */
 const CITED = /([\w./-]+\.rs)#(\w+)/g;
-
-/**
- * The functions of a Rust file: each `fn` line to the first later line that is only `}` at
- * its indent, or to itself for a declaration ending in `;`. Input: the lines.
- * Output: `{ name, start, end }` per function, 0-based and inclusive.
- */
-function functions(lines) {
-  const found = [];
-  lines.forEach((line, start) => {
-    const head = FN.exec(line);
-    if (head === null || COMMENT.test(line)) {
-      return;
-    }
-    const closer = new RegExp(`^\\s{${head[1].length}}\\}[;,)]*\\s*$`);
-    let end = start;
-    if (!line.trimEnd().endsWith(";")) {
-      end = lines.findIndex((text, index) => index > start && closer.test(text));
-      end = end === -1 ? lines.length - 1 : end;
-    }
-    assert.ok(end >= start && end < lines.length, `fn ${head[2]} ends in the file`);
-    found.push({ name: head[2], start, end });
-  });
-  return found;
-}
-
-/** A Rust char literal at the start of a text, such as `'{'`, `'\\''` or `'\\u{7b}'`. */
-const CHAR = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'\n])'/;
-
-/**
- * The text of a Rust file with every string, char literal and comment blanked to spaces, so
- * each offset keeps its place and line breaks stay. Input: the text. Output: the masked text.
- */
-function masked(text) {
-  const out = text.split("");
-  const blank = (from, to) => {
-    for (let at = from; at < to; at += 1) {
-      out[at] = out[at] === "\n" ? "\n" : " ";
-    }
-  };
-  let at = 0;
-  while (at < text.length) {
-    const rest = text.slice(at, at + 3);
-    const raw = /^b?r(#*)"/.exec(text.slice(at, at + 260));
-    if (rest.startsWith("//")) {
-      const stop = text.indexOf("\n", at);
-      const end = stop === -1 ? text.length : stop;
-      blank(at, end);
-      at = end;
-    } else if (rest.startsWith("/*")) {
-      const stop = text.indexOf("*/", at + 2);
-      const end = stop === -1 ? text.length : stop + 2;
-      blank(at, end);
-      at = end;
-    } else if (raw !== null && !/\w/.test(text[at - 1] ?? "")) {
-      const close = `"${raw[1]}`;
-      const stop = text.indexOf(close, at + raw[0].length);
-      const end = stop === -1 ? text.length : stop + close.length;
-      blank(at, end);
-      at = end;
-    } else if (text[at] === '"') {
-      let end = at + 1;
-      while (end < text.length && text[end] !== '"') {
-        end += text[end] === "\\" ? 2 : 1;
-      }
-      blank(at, end + 1);
-      at = end + 1;
-    } else if (text[at] === "'" && CHAR.test(text.slice(at, at + 12))) {
-      const end = text.indexOf("'", at + 2) + 1;
-      blank(at, end);
-      at = end;
-    } else {
-      at += 1;
-    }
-  }
-  assert.equal(out.length, text.length, "masking keeps every offset");
-  return out.join("");
-}
-
-/**
- * The body of one function in masked text: the offset just inside its first `{` and its
- * closing one, the brace depth at each offset (1 directly in the body), its blocks as
- * `{ open, close, header }` (header: where the statement opening it starts) and its statements
- * at every depth as `{ start, end, block }`. Output: the body, or null for a declaration.
- */
-function body(text, starts, fn) {
-  const from = starts[fn.start];
-  const to = fn.end + 1 < starts.length ? starts[fn.end + 1] : text.length;
-  const open = text.indexOf("{", from);
-  if (open === -1 || open >= to || text.slice(from, open).includes(";")) {
-    return null;
-  }
-  const depth = new Map();
-  const statements = [];
-  const blocks = [{ open, close: to, header: from }];
-  const stack = [0];
-  const begun = [null, open + 1];
-  const push = (start, end) => {
-    if (text.slice(start, end).trim() !== "") {
-      statements.push({ start, end, block: stack.at(-1) });
-    }
-  };
-  let level = 1;
-  let at = open + 1;
-  for (; at < to && level > 0; at += 1) {
-    const char = text[at];
-    depth.set(at, level);
-    if (char === "{") {
-      blocks.push({ open: at, close: to, header: begun[level] });
-      stack.push(blocks.length - 1);
-      level += 1;
-      begun[level] = at + 1;
-    } else if (char === "}") {
-      push(begun[level], at);
-      blocks[stack.pop()].close = at;
-      level -= 1;
-      const next = /\S/.exec(text.slice(at + 1, at + 80));
-      const goes = next !== null && /^[.?),]|^else\b/.test(text.slice(at + 1 + next.index));
-      if (level >= 1 && !goes) {
-        push(begun[level], at + 1);
-        begun[level] = at + 1;
-      }
-    } else if (char === ";") {
-      push(begun[level], at + 1);
-      begun[level] = at + 1;
-    }
-  }
-  assert.ok(stack.length === 0 || level > 0, "the body's blocks close in order");
-  return { open, close: at - 1, depth, blocks, statements };
-}
-
-/**
- * The guard calls of a function body that sit directly in it, at brace depth 1: never in an
- * `if`, `match`, loop or closure block. Inputs: the masked text and the body. Output: the
- * offsets of those calls.
- */
-function topGuards(text, fnBody) {
-  const found = [];
-  const all = new RegExp(GUARD.source, "g");
-  all.lastIndex = fnBody.open;
-  for (let call = all.exec(text); call?.index < fnBody.close; call = all.exec(text)) {
-    if (fnBody.depth.get(call.index) === 1) {
-      found.push(call.index);
-    }
-  }
-  return found;
-}
 
 /** A statement's binding: `let [mut] name`, `let (a, b)`, a bare `name` or `(a, b)`, then `=`. */
 const BINDING = /^\s*(let\s+)?(?:mut\s+)?(\(?[\w\s,]*?\)?)\s*(?::[^=]*)?=(?![=>])/;
@@ -222,7 +68,8 @@ function holdsGuard(text, fnBody, guardAt, name, point, memo = new Map()) {
     }
     const visible = holds(fnBody.blocks[statement.block]);
     if (visible || bound[1] === undefined) {
-      events.push({ ...statement, value: source.slice(bound[0].length), visible });
+      const own = element(text, bound[2], statement.start + bound[0].length, statement.end, word);
+      events.push({ ...statement, ...own, visible });
     }
   }
   for (const block of fnBody.blocks.filter((b) => holds(b) && b.header < b.open)) {
@@ -242,7 +89,7 @@ function holdsGuard(text, fnBody, guardAt, name, point, memo = new Map()) {
       guarded = read();
     } else if (!event.visible) {
       guarded = guarded && (word.test(event.value) || read());
-    } else if (guardAt.some((at) => at >= event.start && at < event.end)) {
+    } else if (chainGuarded(text, event.from, event.from + event.value.length, guardAt)) {
       guarded = true;
     } else if (/^\s*None\s*;?\s*$/.test(event.value)) {
       guarded = true;
@@ -252,6 +99,86 @@ function holdsGuard(text, fnBody, guardAt, name, point, memo = new Map()) {
   }
   memo.set(key, guarded);
   return guarded;
+}
+
+/** A closure step's text from its call's `(` to a guard: `(|s| s.` passes its input on. */
+const STEP = /^\(\s*(?:move\s+)?\|\s*(\w+)\s*(?::[^|]*)?\|\s*\1\s*\.\s*$/;
+
+/**
+ * Whether a guard reaches the value a span of masked text ends in: it is a step of the span's
+ * own method chain (outside every parenthesis of the span) or the whole of a closure step
+ * (`.and_then(|s| s.guard_engine(e))`). A guard in another argument or a nested call does not.
+ * Inputs: the masked text, the span's start and end, the depth-1 guards. Output: the answer.
+ */
+function chainGuarded(text, from, to, guardAt) {
+  assert.ok(from <= to, "a span starts before it ends");
+  return guardAt.some((guard) => {
+    if (guard < from || guard >= to) {
+      return false;
+    }
+    const opens = [];
+    for (let at = from; at < guard; at += 1) {
+      if (text[at] === "(" || text[at] === "[") {
+        opens.push(at);
+      } else if ((text[at] === ")" || text[at] === "]") && opens.length > 0) {
+        opens.pop();
+      }
+    }
+    return opens.length === 0 || (opens.length === 1 && STEP.test(text.slice(opens[0], guard)));
+  });
+}
+
+/**
+ * The parts of a tuple literal: `(a, b)` split at its top-level commas, as offsets. Inputs:
+ * the masked text and the span holding the literal, with its `?` or `;` tail. Output: the
+ * parts as `{ from, to }`, or null when the span is no single tuple literal.
+ */
+function tupleParts(text, from, to) {
+  const span = text.slice(from, to);
+  const start = span.search(/\S/);
+  const end = span.replace(/[\s?;]*$/, "").length;
+  if (start === -1 || span[start] !== "(" || span[end - 1] !== ")") {
+    return null;
+  }
+  const parts = [];
+  let level = 0;
+  let part = from + start + 1;
+  for (let at = from + start; at < from + end; at += 1) {
+    const char = text[at];
+    level += "([{".includes(char) ? 1 : ")]}".includes(char) ? -1 : 0;
+    if (level === 0 && at < from + end - 1) {
+      return null;
+    }
+    if (level === 1 && char === ",") {
+      parts.push({ from: part, to: at });
+      part = at + 1;
+    }
+  }
+  parts.push({ from: part, to: from + end - 1 });
+  return parts.filter((p) => text.slice(p.from, p.to).trim() !== "");
+}
+
+/**
+ * The value one binding of a statement reads: for a tuple pattern over a tuple literal, the
+ * element at the name's place; a pattern of another length reads nothing (fails closed);
+ * any other right-hand side, one source, is read whole. Inputs: the masked text, the pattern,
+ * the value's span and the name's word. Output: `{ value, from }`.
+ */
+function element(text, pattern, from, to, word) {
+  const whole = { value: text.slice(from, to), from };
+  if (!pattern.trim().startsWith("(")) {
+    return whole;
+  }
+  const names = pattern.trim().slice(1, -1).split(",");
+  const parts = tupleParts(text, from, to);
+  if (parts === null) {
+    return whole;
+  }
+  const index = names.findIndex((name) => word.test(name));
+  if (parts.length !== names.length || index === -1) {
+    return { value: "", from };
+  }
+  return { value: text.slice(parts[index].from, parts[index].to), from: parts[index].from };
 }
 
 /**
@@ -280,9 +207,6 @@ function guardedCall(text, fnBody, at, call) {
   if (statement === null) {
     return false;
   }
-  if (guardAt.some((g) => g >= statement.start && g < at)) {
-    return true;
-  }
   const lead = text.slice(statement.start, at);
   const bound = BINDING.exec(lead);
   const chain = bound === null ? lead : lead.slice(bound[0].length);
@@ -300,7 +224,41 @@ function guardedCall(text, fnBody, at, call) {
     const closure = before !== null && new RegExp(`\\|[\\w\\s,:]*\\b${before[1]}\\b`).test(lead);
     value = before === null || closure ? chain : before[1];
   }
+  if (chainGuarded(text, receiverChain(text, statement.start, at, value), at, guardAt)) {
+    return true;
+  }
   return fromGuarded(text, fnBody, guardAt, value, statement.start, new Map());
+}
+
+/**
+ * Where the method chain an install call is made on starts: walking back from the call over
+ * names, `.`, `?`, `::` and balanced brackets, to the statement start or the first other
+ * character. A closure step whose parameter is what the call installs (`.and_then(|s|
+ * InstalledSandbox::install(s, ..))`) continues the chain it is a step of. Inputs: the masked
+ * text, the statement start, the call offset and what it installs. Output: the chain's start.
+ */
+function receiverChain(text, start, at, value) {
+  let level = 0;
+  let from = at;
+  while (from > start) {
+    const char = text[from - 1];
+    if (char === ")" || char === "]") {
+      level += 1;
+    } else if ((char === "(" || char === "[") && level > 0) {
+      level -= 1;
+    } else if (level === 0 && !/[\w.?:\s]/.test(char)) {
+      const step = /\(\s*(?:move\s+)?\|\s*(\w+)\s*(?::[^|]*)?\|\s*$/.exec(text.slice(start, from));
+      const head = /^\s*(\w+)/.exec(text.slice(from, at))?.[1];
+      if (char !== "|" || step === null || ![value.trim(), head].includes(step[1])) {
+        break;
+      }
+      from = start + step.index;
+      continue;
+    }
+    from -= 1;
+  }
+  assert.ok(start <= from && from <= at, "the chain sits in the statement before the call");
+  return from;
 }
 
 /** A return type that hands back a sandbox by value, not a reference to one. */
@@ -324,6 +282,89 @@ function builds(text, starts, fn, fnBody) {
   const params = signature.slice(0, signature.lastIndexOf("->"));
   const makes = /\bProjectSandbox::new\s*\(/.test(text.slice(fnBody.open, fnBody.close));
   return makes || !TAKES_SANDBOX.test(params);
+}
+
+/**
+ * The places of `ProjectSandbox` in what a function returns: under a `Result` or `Option`,
+ * each tuple element that is one, or null when the value is the sandbox itself. Input: the
+ * signature's text. Output: the element indexes, or null.
+ */
+function sandboxPlaces(signature) {
+  let type = signature.slice(signature.lastIndexOf("->") + 2).trim();
+  const wrapped = /^(?:Result|Option)\s*<(.*)>$/s.exec(type);
+  if (wrapped !== null) {
+    let level = 0;
+    let end = 0;
+    for (; end < wrapped[1].length && !(level === 0 && wrapped[1][end] === ","); end += 1) {
+      level += "(<".includes(wrapped[1][end]) ? 1 : ")>".includes(wrapped[1][end]) ? -1 : 0;
+    }
+    type = wrapped[1].slice(0, end).trim();
+  }
+  if (!type.startsWith("(")) {
+    return null;
+  }
+  const kinds = [];
+  let level = 0;
+  let part = "";
+  for (const char of type.slice(1, -1)) {
+    level += "(<".includes(char) ? 1 : ")>".includes(char) ? -1 : 0;
+    if (level === 0 && char === ",") {
+      kinds.push(part.trim());
+      part = "";
+    } else {
+      part += char;
+    }
+  }
+  kinds.push(part.trim());
+  return kinds.flatMap((kind, index) => (kind === "ProjectSandbox" ? [index] : []));
+}
+
+/**
+ * Whether every value a builder returns is a sandbox guarded against the engine root: each
+ * `return` and the tail, read through `Ok`/`Some` and, for a tuple, at each sandbox place,
+ * is a guard chain ([`chainGuarded`]) or a method chain on a name that holds a guard
+ * ([`holdsGuard`]). An `Err` returns none. Anything else fails closed, as does a body with no
+ * tail. Inputs: the masked text, the line starts, the function and its body. Output: the answer.
+ */
+function returnsGuarded(text, starts, fn, fnBody) {
+  const guardAt = topGuards(text, fnBody);
+  const places = sandboxPlaces(text.slice(starts[fn.start], fnBody.open));
+  const tail = fnBody.statements.find((s) => s.block === 0 && s.end === fnBody.close);
+  const exits = fnBody.statements.filter((s) => /^\s*return\b/.test(text.slice(s.start, s.end)));
+  if (tail === undefined || /^\s*return\b/.test(text.slice(tail.start, tail.end))) {
+    return false;
+  }
+  const proven = (from, to, point) => {
+    if (chainGuarded(text, from, to, guardAt)) {
+      return true;
+    }
+    const head = /^\s*([A-Za-z_]\w*)\s*(?=\.|$)/.exec(text.slice(from, to));
+    const chained = receiverChain(text, from, to, "") === from;
+    return head !== null && chained && holdsGuard(text, fnBody, guardAt, head[1], point);
+  };
+  return [...exits, tail].every((exit) => {
+    const keyword = /^\s*return\b/.exec(text.slice(exit.start, exit.end));
+    let from = exit.start + (keyword?.[0].length ?? 0);
+    let to = exit.start + text.slice(exit.start, exit.end).replace(/[\s;]*$/, "").length;
+    if (/^\s*Err\s*\(/.test(text.slice(from, to))) {
+      return true;
+    }
+    const wrap = /^\s*(?:Ok|Some)\s*\(/.exec(text.slice(from, to));
+    if (wrap !== null && text[to - 1] === ")") {
+      from += wrap[0].length;
+      to -= 1;
+    }
+    if (places === null) {
+      return proven(from, to, exit.start);
+    }
+    const parts = tupleParts(text, from, to);
+    assert.ok((parts ?? []).every((p) => from <= p.from && p.to <= to), "parts sit in the value");
+    return (
+      parts !== null &&
+      places.length > 0 &&
+      places.every((p) => p < parts.length && proven(parts[p].from, parts[p].to, exit.start))
+    );
+  });
 }
 
 /**
@@ -356,7 +397,8 @@ export function scan(file, text, whole = false) {
   for (const fn of fns) {
     const top = fn.body !== null && topGuards(plain, fn.body).length > 0;
     guarded.set(fn.name, (guarded.get(fn.name) ?? true) && top);
-    if (fn.body !== null && builds(plain, starts, fn, fn.body) && !top) {
+    const builder = fn.body !== null && builds(plain, starts, fn, fn.body);
+    if (builder && !returnsGuarded(plain, starts, fn, fn.body)) {
       sites.push({ line: fn.start + 1, fn: fn.name, guarded: false, returns: true });
     }
   }

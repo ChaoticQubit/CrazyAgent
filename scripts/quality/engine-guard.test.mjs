@@ -139,6 +139,21 @@ test("a guard counts only on the install's receiver, never on another sandbox", 
   assert.equal(lastGuarded(installing(derived)), true);
 });
 
+test("a guard on one sandbox does not cover an install of another in the same statement", () => {
+  const sites = (lines) => scan(FILE, installing(lines)).sites.map(({ guarded }) => guarded);
+  const other = "let other = ProjectSandbox::new(&HOOKS, root, root, root, network())?;";
+  assert.deepEqual(sites([other, "sandbox.guard_engine(engine).and(other.install(profile))?;"]), [
+    false,
+    false,
+  ]);
+  assert.deepEqual(sites([other, "sandbox.guard_engine(engine)?.install(profile)?;"]), [
+    true,
+    false,
+  ]);
+  const kept = "sandbox = pick(sandbox, other.guard_engine(engine)?);";
+  assert.deepEqual(sites([other, kept]), [false]);
+});
+
 test("a guard in an if branch does not cover an install; the same guard unconditional does", () => {
   const branch = [
     "if let Some(runtime) = state.parent() {",
@@ -217,6 +232,29 @@ test("a guarded sandbox carried through a tuple, an Option or an if let stays gu
   assert.deepEqual(sites(made), [false, true]);
 });
 
+test("each tuple binding is read from its own element, a single source from the whole", () => {
+  const sites = (lines) => scan(FILE, installing(lines)).sites.map(({ guarded }) => guarded);
+  const other = "let other = ProjectSandbox::new(&HOOKS, root, root, root, network())?;";
+  const pair = [
+    "sandbox = sandbox.guard_engine(engine)?;",
+    other,
+    "let (kept, loose) = (sandbox, other);",
+    "loose.install(profile)?;",
+    "kept.install(profile)?;",
+  ];
+  assert.deepEqual(sites(pair), [false, true, true]);
+  const inline = [other, "let (kept, loose) = (sandbox.guard_engine(engine)?, other);"];
+  const both = [...inline, "loose.install(profile)?;", "kept.install(profile)?;"];
+  assert.deepEqual(sites(both), [false, true, false]);
+  const short = [other, "let (kept, loose) = (sandbox.guard_engine(engine)?, other, other);"];
+  assert.deepEqual(sites([...short, "kept.install(profile)?;"]), [false, false]);
+  const single = [
+    "sandbox = sandbox.guard_engine(engine)?;",
+    "let (kept, loose) = split(sandbox)?;",
+  ];
+  assert.deepEqual(sites([...single, "loose.install(profile)?;"]), [true, true]);
+});
+
 test("a guard written in a string or a block comment does not count", () => {
   const quoted = ['let note = "sandbox = sandbox.guard_engine(engine)?;";'];
   assert.equal(lastGuarded(installing(quoted)), false);
@@ -253,6 +291,29 @@ test("a builder must guard a sandbox it made; one passing a sandbox on need not"
   assert.equal(scan(FILE, swapped).sites.length, 1);
   const borrowed = "pub fn sandbox(&self) -> &ProjectSandbox {\n    &self.sandbox\n}\n";
   assert.deepEqual(scan(FILE, borrowed).sites, []);
+});
+
+test("a builder that guards one sandbox and returns another fails at each return path", () => {
+  const returning = (shape, lines) =>
+    `pub fn policy(engine: &Path, cut: bool) -> Result<${shape}, SandboxError> {\n` +
+    "    let guarded = ProjectSandbox::new(&HOOKS, root, root, root, network())?" +
+    ".guard_engine(engine)?;\n" +
+    "    let other = ProjectSandbox::new(&HOOKS, root, root, root, network())?;\n" +
+    lines.map((line) => `    ${line}\n`).join("") +
+    "}\n";
+  const site = [{ line: 1, fn: "policy", guarded: false, returns: true }];
+  assert.deepEqual(scan(FILE, returning("ProjectSandbox", ["Ok(other)"])).sites, site);
+  assert.deepEqual(scan(FILE, returning("ProjectSandbox", ["Ok(guarded)"])).sites, []);
+  const early = ["if cut {", "    return Ok(other);", "}", "Ok(guarded)"];
+  assert.deepEqual(scan(FILE, returning("ProjectSandbox", early)).sites, site);
+  const refused = ["if cut {", '    return Err(SandboxError::Invalid("cut"));', "}", "Ok(guarded)"];
+  assert.deepEqual(scan(FILE, returning("ProjectSandbox", refused)).sites, []);
+  const pair = "(ProjectSandbox, PathBuf)";
+  assert.deepEqual(scan(FILE, returning(pair, ["Ok((other, path))"])).sites, site);
+  assert.deepEqual(scan(FILE, returning(pair, ["Ok((guarded, path))"])).sites, []);
+  assert.deepEqual(scan(FILE, returning(pair, ["Ok((path, guarded))"])).sites, site);
+  const picked = returning("ProjectSandbox", ["Ok(pick(guarded, other))"]);
+  assert.deepEqual(scan(FILE, picked).sites, site);
 });
 
 test("an allowlist past its most entries fails, at the most it passes", () => {
