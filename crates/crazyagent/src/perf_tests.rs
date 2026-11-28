@@ -217,14 +217,18 @@ fn settings_save_quit() {
     );
     let mut db = engine_store();
     let mut saved = 0_usize;
+    let mut revision = u64::try_from(moved(&db).0).unwrap();
     let mut step = || {
         let tx = db.transaction().unwrap();
-        let revision = u64::try_from(moved(&tx).0).unwrap();
+        if saved % 10_000 == 0 {
+            assert_eq!(revision, u64::try_from(moved(&tx).0).unwrap());
+        }
         let settings = QUIT[saved % QUIT.len()];
         saved += 1;
         let (outcome, ns) = timed(|| crate::sdk_slice::save_quit(&tx, revision, &settings));
         assert!(matches!(outcome, Ok(Outcome::Applied)));
         tx.commit().unwrap();
+        revision += 1;
         ns
     };
     if let crate::perf_kit::Plan::Flame { calls, secs } = plan {
