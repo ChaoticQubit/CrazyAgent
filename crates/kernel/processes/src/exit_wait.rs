@@ -13,7 +13,7 @@ use std::process::{Child, ExitStatus};
 use std::time::Instant;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// A wait armed on one child that is not yet reaped, so the caller learns of the exit as it
 /// happens instead of on a timed poll. The caller keeps the [`Child`] and does the one reap
