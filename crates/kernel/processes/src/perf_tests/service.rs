@@ -372,6 +372,7 @@ fn service_calls() {
     time(&row("service.cli_link.link_cli", ONE), SAMPLES, || {
         black_box(link_cli(&service.executable, &bin).unwrap());
     });
+    settle_past(&[repointed.as_path(), repointed.parent().unwrap()]);
     let mut flip = false;
     time(
         &row("service.cli_link.link_cli_repoint", ONE),
@@ -385,5 +386,23 @@ fn service_calls() {
             };
             black_box(link_cli(named, &bin).unwrap());
         },
+    );
+}
+
+/// Asserts the wall clock is in a later second than the last change of every entry given,
+/// so a reader that keeps answers only for settled entries keeps them for the row that
+/// follows. Input: the entries. Panics when any entry changed in the current second.
+fn settle_past(entries: &[&Path]) {
+    use std::os::unix::fs::MetadataExt;
+    let changed = entries
+        .iter()
+        .map(|entry| std::fs::symlink_metadata(entry).unwrap().ctime())
+        .max()
+        .unwrap();
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    let now = i64::try_from(since.unwrap().as_secs()).unwrap();
+    assert!(
+        changed < now,
+        "the repoint executable changed at {changed}, now {now}"
     );
 }
