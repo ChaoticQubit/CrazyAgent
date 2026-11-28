@@ -303,7 +303,7 @@ pub(super) fn read_parts(entries: &[&Path]) -> Vec<Part> {
 /// already made. Output: the reads, in order.
 #[cfg(target_os = "macos")]
 pub(super) fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> Vec<Part> {
-    let mut volumes: Volumes = Vec::new();
+    let mut volumes = Volumes::default();
     let parts: Vec<Part> = entries
         .iter()
         .map(|entry| {
@@ -316,7 +316,7 @@ pub(super) fn read_parts_known(entries: &[&Path], known: &[(PathBuf, Read)]) -> 
             })
         })
         .collect();
-    assert!(volumes.len() <= parts.len());
+    assert!(volumes.len <= VOLUMES_MAX && volumes.len <= parts.len());
     assert_eq!(parts.len(), entries.len());
     parts
 }
@@ -453,29 +453,38 @@ fn socket_parts(_socket: &Path, entries: &[&Path]) -> Vec<Part> {
 pub(super) fn held_parts(path: &Path) -> Option<Vec<Part>> {
     use std::os::fd::AsFd;
     use std::path::Component;
-    let mut names = Vec::new();
+    let mut bytes = Vec::with_capacity(path.as_os_str().len() + 1);
+    let mut count = 0;
     for (index, part) in path.components().enumerate() {
         match part {
             Component::RootDir if index == 0 => {}
             Component::Normal(name) => {
-                names.push(std::ffi::CString::new(name.as_encoded_bytes()).ok()?);
+                let name = name.as_encoded_bytes();
+                if name.contains(&0) {
+                    return None;
+                }
+                bytes.extend_from_slice(name);
+                bytes.push(0);
+                count += 1;
             }
             _ => return None,
         }
     }
-    let mut places: Vec<&Path> = path.ancestors().collect();
-    places.reverse();
-    if places.len() != names.len() + 1 {
+    let places = path.ancestors().count();
+    if places != count + 1 {
         return None;
     }
+    let names = bytes.split_inclusive(|byte| *byte == 0).map(|name| {
+        std::ffi::CStr::from_bytes_with_nul(name).expect("each name ends at its one NUL")
+    });
     let mut held = crazyagent_macos_fs::open_search(None, c"/", false).ok()?;
-    let mut parts = Vec::with_capacity(places.len());
-    let mut volumes: Volumes = Vec::new();
+    let mut parts = Vec::with_capacity(places);
+    let mut volumes = Volumes::default();
     let read = crazyagent_macos_fs::held_entry(held.as_fd());
     parts.push(held_part(read, &mut volumes, |device| {
         crazyagent_macos_fs::held_volume_keeps_lists(held.as_fd(), device).unwrap_or(false)
     }));
-    for (index, name) in names.iter().enumerate() {
+    for (index, name) in names.enumerate() {
         let at = |held: &std::os::fd::OwnedFd, volumes: &mut Volumes| {
             let read = crazyagent_macos_fs::held_entry_at(Some(held.as_fd()), name);
             held_part(read, volumes, |device| {
@@ -483,7 +492,7 @@ pub(super) fn held_parts(path: &Path) -> Option<Vec<Part>> {
                     .unwrap_or(false)
             })
         };
-        if index + 1 == names.len() {
+        if index + 1 == count {
             parts.push(at(&held, &mut volumes));
             break;
         }
@@ -517,18 +526,48 @@ pub(super) fn held_parts(path: &Path) -> Option<Vec<Part>> {
         } else {
             Part::Unreadable
         };
-        parts.resize(places.len(), rest);
+        parts.resize(places, rest);
         break;
     }
-    assert!(volumes.len() <= parts.len());
-    assert_eq!(parts.len(), places.len());
+    assert!(volumes.len <= VOLUMES_MAX && volumes.len <= parts.len());
+    assert_eq!(parts.len(), places);
     Some(parts)
 }
 
-/// The volumes one held walk has asked about, by device, each with whether it keeps access
-/// lists; it lives only for that walk.
+/// The most volumes one held walk keeps an answer for; a walk past them asks again.
 #[cfg(target_os = "macos")]
-type Volumes = Vec<(u64, bool)>;
+pub(super) const VOLUMES_MAX: usize = 8;
+
+/// The volumes one held walk has asked about, by device, each with whether it keeps access
+/// lists, in a fixed table; it lives only for that walk.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(super) struct Volumes {
+    known: [(u64, bool); VOLUMES_MAX],
+    pub(super) len: usize,
+}
+
+#[cfg(target_os = "macos")]
+impl Volumes {
+    /// Whether a device's volume keeps access lists: the walk's earlier answer for it, or the
+    /// question asked now and kept while the table has room. Inputs: the device and the
+    /// question. Output: the answer.
+    pub(super) fn keeps(&mut self, device: u64, volume: impl FnOnce(u64) -> bool) -> bool {
+        assert!(self.len <= VOLUMES_MAX);
+        if let Some((_, keeps)) = self.known[..self.len]
+            .iter()
+            .find(|(known, _)| *known == device)
+        {
+            return *keeps;
+        }
+        let keeps = volume(device);
+        if self.len < VOLUMES_MAX {
+            self.known[self.len] = (device, keeps);
+            self.len += 1;
+        }
+        keeps
+    }
+}
 
 /// One part as a held read gives it: missing, unreadable, carrying an access list others can
 /// change it through ([`super::acl::held_shared`], never read for a link, as [`read_parts`]
@@ -548,14 +587,7 @@ fn held_part(
     };
     let link = read.link();
     if !link {
-        let keeps = match volumes.iter().find(|(device, _)| *device == read.device) {
-            Some((_, keeps)) => *keeps,
-            None => {
-                let keeps = volume(read.device);
-                volumes.push((read.device, keeps));
-                keeps
-            }
-        };
+        let keeps = volumes.keeps(read.device, volume);
         match super::acl::held_shared(&read, keeps) {
             None => return Part::Unreadable,
             Some(true) => return Part::Shared,
