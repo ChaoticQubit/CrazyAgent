@@ -34,8 +34,9 @@ impl Grants {
     /// Builds the table from generated grants, checked against the generated permission
     /// table first: every granted permission is one some capability needs, and no
     /// capability needing it sits above the plugin's tier. Inputs: the bundled grants and
-    /// the permission table. Output: the table, `grants_unknown_permission`,
-    /// `grants_tier_too_high`, or a refusal of [`Grants::new`]'s checks.
+    /// the permission table. Each grant's capability stems become the stems it serves.
+    /// Output: the table, `grants_unknown_permission`, `grants_tier_too_high`, or a refusal
+    /// of the shared and served-stem checks.
     pub fn from_table(
         grants: &[BundledGrant],
         permissions: &[Permission],
@@ -44,7 +45,9 @@ impl Grants {
             return Err("grants_too_many");
         }
         let mut entries = Vec::with_capacity(grants.len());
+        let mut served = Vec::new();
         for grant in grants {
+            served.extend(grant.capabilities.iter().map(|stem| (*stem, grant.plugin)));
             for held in grant.permissions {
                 let mut needing = permissions.iter().filter(|p| p.needs == *held).peekable();
                 if needing.peek().is_none() {
@@ -57,7 +60,7 @@ impl Grants {
             entries.push((grant.plugin, sdk_tier(grant.tier), grant.permissions));
         }
         assert_eq!(entries.len(), grants.len());
-        Self::build(&entries, &[], permissions)
+        Self::build(&entries, &served, permissions)
     }
 
     /// Builds the table with no permission table check, for tests only; the engine builds

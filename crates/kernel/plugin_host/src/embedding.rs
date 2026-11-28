@@ -304,6 +304,9 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
     if !base.permissions.is_empty() {
         return Err(problem("app_plugin_field_invalid", "permissions"));
     }
+    if !base.capabilities.is_empty() {
+        return Err(problem("app_plugin_field_invalid", "capabilities"));
+    }
     let title = fields.text("title", TITLE_BYTES_MAX)?;
     if title.trim().is_empty() {
         return Err(problem("app_plugin_field_invalid", "title"));
