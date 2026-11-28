@@ -85,15 +85,13 @@ fn a_database_without_the_session_tables_has_nothing_in_use() {
 /// refuses with the in-use code, none lets it go on, and a database with no file to open
 /// again refuses as unavailable.
 #[test]
-fn a_job_reads_the_sessions_again_from_the_database_file() {
-    let folder = tempfile::tempdir().unwrap();
+fn a_job_reads_the_sessions_again_from_the_database_file() -> Result<(), String> {
+    let folder =
+        tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
     let file = folder.path().join("engine.db");
-    let path = file.to_str().unwrap();
-    fill(
-        &Connection::open(&file).unwrap(),
-        &[("codex", "working")],
-        None,
-    );
+    let path = utf8(&file)?;
+    let db = Connection::open(&file).map_err(|error| format!("open {path}: {error}"))?;
+    fill(&db, &[("codex", "working")], None);
     assert_eq!(
         reopened(path).and_then(|db| unused(&db, "codex")),
         Err(IN_USE)
@@ -104,10 +102,15 @@ fn a_job_reads_the_sessions_again_from_the_database_file() {
     );
     assert!(matches!(reopened(""), Err(UNAVAILABLE)));
     let missing = folder.path().join("missing.db");
-    assert!(matches!(
-        reopened(missing.to_str().unwrap()),
-        Err(UNAVAILABLE)
-    ));
+    assert!(matches!(reopened(utf8(&missing)?), Err(UNAVAILABLE)));
+    Ok(())
+}
+
+/// A path as the `&str` the reopen takes. Input: the path. Output: its text, or an error
+/// naming a path that is not UTF-8.
+fn utf8(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("{} is not UTF-8", path.display()))
 }
 
 /// A database with the update settings, the team runtime tables and Check and update on,
@@ -258,32 +261,90 @@ fn a_launch_held_before_an_update_begins_makes_the_update_refuse() {
     assert_ne!(started, Err(IN_USE));
 }
 
-/// On Windows a program started from an update's folder outside any runtime, held
-/// suspended, refuses the update as in use through the process snapshot until it ends.
+/// A started child that is killed and waited for once it goes out of scope, so a failed
+/// assert leaves no suspended process behind; errors there are ignored, since a child that
+/// already ended is no failure.
 #[cfg(windows)]
-#[test]
-fn a_windows_program_started_outside_the_runtime_under_the_prefix_refuses_the_update() {
+struct Held(std::process::Child);
+
+#[cfg(windows)]
+impl Held {
+    /// Ends the child now and waits for it, for a row that checks what follows its end.
+    /// Output: Ok, or the error naming the step and the process.
+    fn end(&mut self) -> Result<(), String> {
+        let id = self.0.id();
+        self.0
+            .kill()
+            .map_err(|error| format!("kill {id}: {error}"))?;
+        self.0
+            .wait()
+            .map(drop)
+            .map_err(|error| format!("wait {id}: {error}"))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The Windows System32 folder and a new temporary prefix in its canonical spelling, for a
+/// row that starts a program held suspended. Output: the folder, the temporary folder that
+/// owns the prefix, and the prefix, or the error naming the step.
+#[cfg(windows)]
+fn windows_prefix() -> Result<(PathBuf, tempfile::TempDir, PathBuf), String> {
+    let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
+    let made = tempfile::tempdir().map_err(|error| format!("make a temporary folder: {error}"))?;
+    let prefix = kernel_sandbox::paths::canonical(made.path())
+        .map_err(|error| format!("canonical {}: {error}", made.path().display()))?;
+    Ok((PathBuf::from(root).join("System32"), made, prefix))
+}
+
+/// Starts a program held suspended with no window, through the spawn gate. Inputs: the
+/// program and its arguments. Output: the held child, or the error naming the program.
+#[cfg(windows)]
+fn suspended(program: &Path, arguments: &[&std::ffi::OsStr]) -> Result<Held, String> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
-    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-    let made = tempfile::tempdir().unwrap();
-    let prefix = kernel_sandbox::paths::canonical(made.path()).unwrap();
-    let copy = prefix.join("fx.exe");
-    std::fs::copy(system.join("PING.EXE"), &copy).unwrap();
-    let mut child = kernel_processes::spawn_gate::spawn(
-        Command::new(&copy)
-            .args(["-n", "60", "127.0.0.1"])
+    kernel_processes::spawn_gate::spawn(
+        Command::new(program)
+            .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .creation_flags(0x0000_0004 | 0x0800_0000),
     )
-    .unwrap();
+    .map(Held)
+    .map_err(|error| format!("spawn {}: {error}", program.display()))
+}
+
+/// On Windows a program started from an update's folder outside any runtime, held
+/// suspended, refuses the update as in use through the process snapshot until it ends.
+#[cfg(windows)]
+#[test]
+fn a_windows_program_started_outside_the_runtime_under_the_prefix_refuses_the_update()
+-> Result<(), String> {
+    let (system, _made, prefix) = windows_prefix()?;
+    let ping = system.join("PING.EXE");
+    let copy = prefix.join("fx.exe");
+    std::fs::copy(&ping, &copy)
+        .map_err(|error| format!("copy {} to {}: {error}", ping.display(), copy.display()))?;
+    let mut child = suspended(
+        &copy,
+        &[
+            std::ffi::OsStr::new("-n"),
+            std::ffi::OsStr::new("60"),
+            std::ffi::OsStr::new("127.0.0.1"),
+        ],
+    )?;
     let held = [prefix];
     assert_eq!(not_running(&held, IMAGES), Err(IN_USE));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.end()?;
     assert_eq!(not_running(&held, IMAGES), Ok(()));
+    Ok(())
 }
 
 /// On Windows a runtime started from outside an update's folder whose command line names a
@@ -291,26 +352,21 @@ fn a_windows_program_started_outside_the_runtime_under_the_prefix_refuses_the_up
 /// ends, so a session the database does not know is still seen.
 #[cfg(windows)]
 #[test]
-fn a_windows_runtime_whose_command_line_names_a_script_under_the_prefix_refuses_the_update() {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-    let made = tempfile::tempdir().unwrap();
-    let prefix = kernel_sandbox::paths::canonical(made.path()).unwrap();
+fn a_windows_runtime_whose_command_line_names_a_script_under_the_prefix_refuses_the_update()
+-> Result<(), String> {
+    let (system, _made, prefix) = windows_prefix()?;
     let script = prefix.join("node_modules").join("fx").join("cli.js");
-    let mut child = kernel_processes::spawn_gate::spawn(
-        Command::new(system.join("PING.EXE"))
-            .args(["-n", "60"])
-            .arg(&script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x0000_0004 | 0x0800_0000),
-    )
-    .unwrap();
+    let mut child = suspended(
+        &system.join("PING.EXE"),
+        &[
+            std::ffi::OsStr::new("-n"),
+            std::ffi::OsStr::new("60"),
+            script.as_os_str(),
+        ],
+    )?;
     let held = [prefix];
     assert_eq!(not_running(&held, IMAGES), Err(IN_USE));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.end()?;
     assert_eq!(not_running(&held, IMAGES), Ok(()));
+    Ok(())
 }
