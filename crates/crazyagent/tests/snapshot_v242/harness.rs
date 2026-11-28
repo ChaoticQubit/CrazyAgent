@@ -321,7 +321,7 @@ fn handover(words: &[String], relay: Option<&Relay>, home: &Path) -> Value {
 /// scratch folder, the harness and the shape. Output: the surface as JSON.
 fn headless(scratch: &Path, harness: &str, shape: Shape) -> Result<Value, String> {
     let folders = folders(scratch)?;
-    let (routed, relay) = route(request(harness, &folders, shape)?).map_err(code)?;
+    let (routed, relay, _launching) = route(request(harness, &folders, shape)?).map_err(code)?;
     assert_eq!(relay.is_some(), matches!(shape.account, Account::RoutedKey));
     let built = command(&routed).map_err(code)?;
     let mut spec = headless_spec(&built, &folders.home, shape.tools)?;
@@ -524,7 +524,7 @@ fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
 /// resumes. Output: the surface as JSON.
 fn pane(scratch: &Path, harness: &str, shape: Shape, resume: bool) -> Result<Value, String> {
     let folders = folders(scratch)?;
-    let (routed, relay) = route(request(harness, &folders, shape)?).map_err(code)?;
+    let (routed, relay, _launching) = route(request(harness, &folders, shape)?).map_err(code)?;
     let key_file = match &routed.account {
         AccountBinding::Url { key: Some(key), .. } | AccountBinding::ApiKey { key, .. } => {
             Some(interactive::write_key(&folders.home, key).map_err(code)?)
@@ -649,7 +649,8 @@ fn interactive_refusals(scratch: &Path) -> Result<Value, String> {
         account: Account::RoutedKey,
         ..CONFINED
     };
-    let (routed, relay) = route(request("claude-code", &folders, keyed)?).map_err(code)?;
+    let (routed, relay, _launching) =
+        route(request("claude-code", &folders, keyed)?).map_err(code)?;
     note(
         "key-without-key-file",
         outcome(interactive::command(&routed, None, &fresh)),
