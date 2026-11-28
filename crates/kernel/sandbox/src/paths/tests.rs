@@ -840,8 +840,9 @@ fn a_folder_swapped_between_two_grants_of_one_build_refuses_the_install() {
     }
 }
 
-/// A folder swapped for a link into a secret between two grants of one build is refused,
-/// by the second grant or else by the install, which reads it again.
+/// A folder swapped for a link into a secret between two grants of one build is refused:
+/// by the second grant, under any of its rules, or else by the install, which reads it
+/// again and refuses with [`SECRET_ROOT_REFUSED`] or [`GRANT_CHANGED`].
 #[cfg(unix)]
 #[test]
 fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
@@ -850,16 +851,15 @@ fn a_folder_swapped_for_a_link_into_a_secret_between_two_grants_is_refused() {
     std::fs::rename(&x, folder.path().join("x-old")).unwrap();
     std::fs::create_dir_all(home.join(".ssh").join("b")).unwrap();
     std::os::unix::fs::symlink(home.join(".ssh"), &x).unwrap();
-    let refused = match kept.grant(&x.join("b"), &secrets) {
-        Err(SandboxError::Invalid(reason)) => reason,
+    match kept.grant(&x.join("b"), &secrets) {
+        Err(SandboxError::Invalid(_)) => {}
         Err(other) => panic!("{other:?}"),
         Ok(()) => match kept.recheck() {
-            Err(SandboxError::Invalid(reason)) => reason,
+            Err(SandboxError::Invalid(reason)) => assert!(
+                reason == SECRET_ROOT_REFUSED || reason == GRANT_CHANGED,
+                "{reason}"
+            ),
             other => panic!("{other:?}"),
         },
-    };
-    assert!(
-        refused == SECRET_ROOT_REFUSED || refused == GRANT_CHANGED,
-        "{refused}"
-    );
+    }
 }
