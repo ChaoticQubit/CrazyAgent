@@ -28,14 +28,22 @@ pub fn owner_packet_buffer() -> OwnerPacket {
     Zeroizing::new([0; OWNER_PACKET_BYTES])
 }
 
-/// One 32-byte owner, runner, custody or IDE capability token, wiped when its holder
-/// drops it.
-pub type OwnerToken = Zeroizing<[u8; 32]>;
+/// One 32-byte owner, runner, custody or IDE capability token, held on the heap from its
+/// birth so moving a holder copies only the pointer, and wiped when its holder drops it.
+pub type OwnerToken = Box<Zeroizing<[u8; 32]>>;
 
-/// A zeroed capability token, wiped when dropped, to generate or read a token into.
-/// Output: the token.
+/// A zeroed capability token on the heap, wiped when dropped, to generate or read a token
+/// into. Output: the token.
 pub fn owner_token() -> OwnerToken {
-    Zeroizing::new([0; 32])
+    Box::new(Zeroizing::new([0; 32]))
+}
+
+/// A second holder's copy of a capability token, allocated first and then filled from the
+/// heap, so the bytes never pass through a stack value. Input: the token. Output: the copy.
+pub fn owner_token_copy(token: &[u8; 32]) -> OwnerToken {
+    let mut copy = owner_token();
+    copy.copy_from_slice(token);
+    copy
 }
 
 /// The tag byte an owner client sends for its kind. Input: the kind. Output: 0 for the
@@ -157,4 +165,16 @@ pub fn drain_errors(
     )?;
     *count += bytes.len();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OwnerToken;
+
+    /// An owner token lives behind a pointer, so moving any holder of one copies only the
+    /// pointer and leaves no copy of the token's bytes behind.
+    #[test]
+    fn owner_token_is_a_pointer() {
+        assert_eq!(size_of::<OwnerToken>(), size_of::<usize>());
+    }
 }
