@@ -104,7 +104,7 @@ fn key(path: &Path) -> OwnerToken {
     let mut token = owner_token();
     std::fs::File::open(path)
         .unwrap()
-        .read_exact(&mut *token)
+        .read_exact(&mut **token)
         .unwrap();
     token
 }
