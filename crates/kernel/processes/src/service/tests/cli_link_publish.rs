@@ -123,3 +123,98 @@ fn a_link_left_at_the_staged_name_is_replaced_and_the_publish_goes_on() -> TestR
     assert_eq!(names(&bin)?, vec!["crazyagent"]);
     Ok(())
 }
+
+/// The inode and change time `lstat` reads of a name, which a swap or a remake changes.
+/// Input: the name. Output: the pair, or the read that failed, naming the path.
+fn stamp_of(name: &Path) -> TestResult<(u64, i64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = at(name, std::fs::symlink_metadata(name))?;
+    Ok((metadata.ino(), metadata.ctime(), metadata.ctime_nsec()))
+}
+
+/// A link this user owns that already names the executable, by the same bytes, is left as
+/// it is: nothing is made, swapped or removed, and nothing is staged.
+#[test]
+fn a_link_that_already_names_the_executable_is_left_unwritten() -> TestResult {
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let before = stamp_of(&link)?;
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(stamp_of(&link)?, before);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_eq!(names(&bin)?, vec!["crazyagent".to_string()]);
+    Ok(())
+}
+
+/// A link that names another executable is swapped for one that names this executable.
+#[test]
+fn a_link_naming_another_executable_is_replaced() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let other = temp.path().join("app/other");
+    at(&other, std::fs::write(&other, "#!/bin/sh\n"))?;
+    let link = bin.join("crazyagent");
+    at(&link, std::os::unix::fs::symlink(&other, &link))?;
+    let before = stamp_of(&link)?;
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_ne!(stamp_of(&link)?.0, before.0);
+    assert_eq!(names(&bin)?, vec!["crazyagent".to_string()]);
+    Ok(())
+}
+
+/// A link that names the executable by another spelling of the same path is not the same
+/// bytes, so it is swapped for one that names the executable exactly.
+#[test]
+fn a_link_naming_the_executable_by_another_spelling_is_swapped() -> TestResult {
+    let (temp, executable, bin) = setup()?;
+    let spelled = temp.path().join("app/./crazyagent");
+    let link = bin.join("crazyagent");
+    at(&link, std::os::unix::fs::symlink(&spelled, &link))?;
+    let before = stamp_of(&link)?;
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(
+        at(&link, std::fs::read_link(&link))?.as_os_str(),
+        executable.as_os_str()
+    );
+    assert_ne!(stamp_of(&link)?.0, before.0);
+    Ok(())
+}
+
+/// A link that names the executable but turns into a regular file between the check and the
+/// read of what it names is refused, and the file is kept as it was.
+#[test]
+fn a_link_whose_name_turns_into_a_file_before_the_read_is_refused_and_kept() -> TestResult {
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    before_publish(|name| {
+        std::fs::remove_file(name).unwrap();
+        std::fs::write(name, "another installer\n").unwrap();
+    });
+    assert!(link_cli(&executable, &bin).is_err());
+    assert_eq!(
+        at(&link, std::fs::read_to_string(&link))?,
+        "another installer\n"
+    );
+    assert_eq!(names(&bin)?, vec!["crazyagent".to_string()]);
+    Ok(())
+}
+
+/// A link that names the executable but carries an access list letting another user change
+/// it is swapped for a new link of this user, though it names the right file.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_with_an_access_list_for_others_is_swapped_for_a_new_one() -> TestResult {
+    let (_temp, executable, bin) = setup()?;
+    let link = link_cli(&executable, &bin).unwrap();
+    let status = std::process::Command::new("/bin/chmod")
+        .args(["-h", "+a", "group:staff allow writeattr,writeextattr,delete"])
+        .arg(&link)
+        .status();
+    assert!(at(&link, status)?.success());
+    let before = stamp_of(&link)?;
+    assert_eq!(link_cli(&executable, &bin).unwrap(), link);
+    assert_eq!(at(&link, std::fs::read_link(&link))?, executable);
+    assert_ne!(stamp_of(&link)?.0, before.0);
+    Ok(())
+}
