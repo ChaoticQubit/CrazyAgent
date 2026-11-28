@@ -2705,36 +2705,13 @@ enum ClaudeServer<'a> {
     },
 }
 
-/// Counts the bytes written to it and keeps none, so a buffer can be sized before the
-/// real write.
-struct Counted(usize);
-
-impl std::io::Write for Counted {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Serializes a value that borrows secrets into one buffer allocated at the text's exact
-/// size, so no growth frees a block holding part of a secret, and wipes that buffer if the
-/// write fails. Input: the value. Output: the JSON text, or `launch_context_unavailable`.
-fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
-    let mut counted = Counted(0);
-    serde_json::to_writer(&mut counted, value)
+/// Serializes a value that borrows secrets through `kernel_security::secret::sized_json`,
+/// whose buffer is allocated at the text's exact size and never grows, so no growth frees a
+/// block holding part of a secret. Input: the value. Output: the JSON text, or
+/// `launch_context_unavailable`.
+pub(crate) fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
+    let text = kernel_security::secret::sized_json(value)
         .map_err(|_| failure("launch_context_unavailable"))?;
-    let mut text = Vec::with_capacity(counted.0);
-    let capacity = text.capacity();
-    if serde_json::to_writer(&mut text, value).is_err() {
-        kernel_security::secret::wipe(&mut text);
-        return Err(failure("launch_context_unavailable"));
-    }
-    assert_eq!(text.len(), counted.0);
-    assert_eq!(text.capacity(), capacity);
     String::from_utf8(text).map_err(|error| {
         let mut bytes = error.into_bytes();
         kernel_security::secret::wipe(&mut bytes);
@@ -3621,6 +3598,10 @@ mod tests;
 #[cfg(all(test, windows))]
 #[path = "launch_context/windows_tests.rs"]
 mod windows_tests;
+
+#[cfg(test)]
+#[path = "launch_context/sized_json_tests.rs"]
+mod sized_json_tests;
 
 #[cfg(all(test, unix))]
 #[path = "launch_context/listed_tests.rs"]

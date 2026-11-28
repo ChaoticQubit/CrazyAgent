@@ -80,14 +80,12 @@ fn sized_refuses_a_control_byte_in_an_escaped_piece() {
 
 /// A value whose JSON changes length between two serializations: a counter written as
 /// `first` on the first pass and `then` after it, next to a secret.
-#[cfg(unix)]
 struct Changing {
     first: u32,
     then: u32,
     passes: std::cell::Cell<u32>,
 }
 
-#[cfg(unix)]
 impl serde::Serialize for Changing {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let pass = self.passes.get();
@@ -97,7 +95,6 @@ impl serde::Serialize for Changing {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn sized_json_refuses_a_value_that_grows_between_passes() {
     let value = Changing {
@@ -109,7 +106,6 @@ fn sized_json_refuses_a_value_that_grows_between_passes() {
     assert_eq!(value.passes.get(), 2);
 }
 
-#[cfg(unix)]
 #[test]
 fn sized_json_refuses_a_value_that_shrinks_between_passes() {
     let value = Changing {
@@ -119,4 +115,93 @@ fn sized_json_refuses_a_value_that_shrinks_between_passes() {
     };
     assert!(super::sized_json(&value).is_err());
     assert_eq!(value.passes.get(), 2);
+}
+
+#[test]
+fn capped_writer_refuses_a_longer_value_without_growing_or_passing_its_limit() {
+    let limit = serde_json::to_vec(&(9, "secret-bytes")).unwrap().len();
+    let mut buffer = Vec::with_capacity(limit);
+    let capacity = buffer.capacity();
+    let refused = serde_json::to_writer(
+        &mut super::Capped {
+            buffer: &mut buffer,
+            limit,
+        },
+        &(10, "secret-bytes"),
+    );
+    assert!(refused.is_err());
+    assert_eq!(buffer.capacity(), capacity);
+    assert!(buffer.len() <= limit);
+    assert!(buffer.ends_with(b"\""));
+    assert!(!buffer.contains(&b']'));
+}
+
+#[test]
+fn settle_wipes_the_buffer_on_a_refused_pass_and_keeps_its_capacity() {
+    let mut buffer = Vec::with_capacity(16);
+    buffer.extend_from_slice(b"[10,\"secret");
+    let capacity = buffer.capacity();
+    let refused = std::io::Error::other("refused");
+    let settled = super::settle(
+        &mut buffer,
+        Err(serde_json::Error::io(refused)),
+        16,
+        capacity,
+    );
+    assert!(settled.is_err());
+    assert!(buffer.is_empty());
+    assert_eq!(buffer.capacity(), capacity);
+}
+
+#[test]
+fn settle_wipes_the_buffer_when_the_pass_wrote_fewer_bytes_than_counted() {
+    let mut buffer = Vec::with_capacity(16);
+    buffer.extend_from_slice(b"[9,\"secret\"]");
+    let capacity = buffer.capacity();
+    let settled = super::settle(&mut buffer, Ok(()), 16, capacity);
+    assert!(settled.is_err());
+    assert!(buffer.is_empty());
+}
+
+#[test]
+fn settle_keeps_the_bytes_of_a_pass_that_wrote_its_count() {
+    let mut buffer = Vec::with_capacity(12);
+    buffer.extend_from_slice(b"[9,\"secret\"]");
+    let capacity = buffer.capacity();
+    super::settle(&mut buffer, Ok(()), 12, capacity).unwrap();
+    assert_eq!(buffer, br#"[9,"secret"]"#.to_vec());
+}
+
+#[test]
+fn capped_write_all_refuses_a_chunk_past_its_limit_before_pushing_any_byte_of_it() {
+    use std::io::Write;
+    let mut buffer = Vec::with_capacity(8);
+    let capacity = buffer.capacity();
+    let mut capped = super::Capped {
+        buffer: &mut buffer,
+        limit: 8,
+    };
+    capped.write_all(b"abc").unwrap();
+    assert!(capped.write_all(b"secret").is_err());
+    capped.write_all(b"defgh").unwrap();
+    assert!(capped.write_all(b"i").is_err());
+    assert_eq!(buffer.capacity(), capacity);
+    assert_eq!(buffer, b"abcdefgh".to_vec());
+}
+
+#[test]
+fn capped_writer_takes_a_value_of_its_limit_without_growing() {
+    let limit = serde_json::to_vec(&(9, "secret-bytes")).unwrap().len();
+    let mut buffer = Vec::with_capacity(limit);
+    let capacity = buffer.capacity();
+    serde_json::to_writer(
+        &mut super::Capped {
+            buffer: &mut buffer,
+            limit,
+        },
+        &(9, "secret-bytes"),
+    )
+    .unwrap();
+    assert_eq!(buffer.capacity(), capacity);
+    assert_eq!(buffer, br#"[9,"secret-bytes"]"#.to_vec());
 }
