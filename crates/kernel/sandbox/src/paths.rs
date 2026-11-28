@@ -806,6 +806,35 @@ fn clear_of_walked<'w>(
     Ok(())
 }
 
+/// Whether `paths` holds `path` by [`Path`] equality, so a spelling that differs only by a
+/// doubled slash, a `.` part or a trailing slash still matches. Inputs: the paths and the
+/// path. Output: the answer.
+fn holds_path<'p>(paths: impl Iterator<Item = &'p Path> + Clone, path: &Path) -> bool {
+    #[cfg(test)]
+    PATH_FALLBACKS.with(|fallbacks| fallbacks.set(fallbacks.get() + 1));
+    paths.into_iter().any(|held| held == path)
+}
+
+/// The paths of `walks`, in order, for [`holds_path`]. Input: the walks. Output: their
+/// paths.
+fn walked_paths(walks: &[Walk]) -> impl Iterator<Item = &Path> + Clone {
+    walks.iter().map(|walk| walk.path.as_path())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`holds_path`] compared by [`Path`] equality on this thread, read by
+    /// the rows that pin which compares a build makes.
+    static PATH_FALLBACKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`Path`] equality passes [`holds_path`] made on this thread so far.
+/// Takes nothing. Returns the count.
+#[cfg(test)]
+pub(crate) fn path_fallbacks() -> usize {
+    PATH_FALLBACKS.with(std::cell::Cell::get)
+}
+
 /// One path a sandbox build granted, with its walk from that check and every secret path
 /// it was checked against.
 #[derive(Debug, Clone)]
@@ -884,7 +913,7 @@ impl Kept {
         let mut fresh: Vec<Walk> = Vec::new();
         for checked in &self.checked {
             for secret in &checked.against {
-                if !fresh.iter().any(|walk| walk.path == *secret) {
+                if !holds_path(fresh.iter().map(|walk| walk.path.as_path()), secret) {
                     fresh.push(Walk::read(secret, &mut reads)?);
                 }
             }
@@ -894,9 +923,9 @@ impl Kept {
             if now.ids != checked.walk.ids || now.reached != checked.walk.reached {
                 return Err(invalid(GRANT_CHANGED));
             }
-            let against = fresh
-                .iter()
-                .filter(|walk| checked.against.contains(&walk.path));
+            let against = fresh.iter().filter(|walk| {
+                holds_path(checked.against.iter().map(PathBuf::as_path), &walk.path)
+            });
             clear_of_walked(&now, against)?;
         }
         Ok(())
@@ -907,17 +936,15 @@ impl Kept {
     /// [`SECRET_ROOT_REFUSED`].
     fn walk_secrets(&mut self, secrets: &[PathBuf]) -> Result<(), SandboxError> {
         for secret in secrets {
-            if !self.walked.secrets.iter().any(|walk| walk.path == *secret) {
+            if !holds_path(walked_paths(&self.walked.secrets), secret) {
                 let walk = Walk::read(secret, &mut self.walked.reads)?;
                 self.walked.secrets.push(walk);
             }
         }
         assert!(
-            secrets.iter().all(|secret| self
-                .walked
-                .secrets
+            secrets
                 .iter()
-                .any(|walk| walk.path == *secret))
+                .all(|secret| holds_path(walked_paths(&self.walked.secrets), secret))
         );
         Ok(())
     }
@@ -947,7 +974,7 @@ impl Kept {
         {
             Some(checked) => {
                 for secret in secrets {
-                    if !checked.against.contains(secret) {
+                    if !holds_path(checked.against.iter().map(PathBuf::as_path), secret) {
                         checked.against.push(secret.clone());
                     }
                 }

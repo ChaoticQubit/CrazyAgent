@@ -898,3 +898,81 @@ fn a_stale_walk_kept_from_the_build_reads_is_refused_at_install() {
         other => panic!("{other:?}"),
     }
 }
+
+/// The path spelled with its last separator doubled: equal to it as a [`Path`], different
+/// in its bytes. Input: the path. Output: the other spelling.
+#[cfg(unix)]
+fn doubled(path: &Path) -> PathBuf {
+    let mut text = path.parent().unwrap().as_os_str().to_owned();
+    text.push("//");
+    text.push(path.file_name().unwrap());
+    let other = PathBuf::from(text);
+    assert_ne!(other.as_os_str(), path.as_os_str());
+    assert_eq!(other, path);
+    other
+}
+
+/// A second grant whose list spells one secret with a doubled slash walks no second copy of
+/// it, and a grant whose list has the same bytes as the walked ones makes no [`Path`]
+/// compare in the build's secret walks.
+#[cfg(unix)]
+#[test]
+fn a_secret_spelled_with_a_doubled_slash_is_walked_once_per_build() {
+    let (_folder, home, secrets, x) = two_roots_under_one_folder();
+    let mut kept = granted_build(&home, &secrets, &x.join("a"));
+    let walked = kept.walked.secrets.len();
+    let mut respelled = secrets.clone();
+    respelled[0] = doubled(&secrets[0]);
+    kept.grant(&x.join("b"), &respelled).unwrap();
+    assert_eq!(kept.walked.secrets.len(), walked);
+    std::fs::create_dir_all(x.join("c")).unwrap();
+    let before = path_fallbacks();
+    kept.grant(&x.join("c"), &secrets).unwrap();
+    assert_eq!(path_fallbacks() - before, 0);
+}
+
+/// A root granted again with one secret spelled with a doubled slash keeps one entry for
+/// that secret, and granted again with the same bytes makes no [`Path`] compare.
+#[cfg(unix)]
+#[test]
+fn a_root_granted_again_with_a_respelled_secret_keeps_one_entry_for_it() {
+    let (_folder, home, secrets, x) = two_roots_under_one_folder();
+    let mut kept = granted_build(&home, &secrets, &x.join("a"));
+    let against = kept.checked[0].against.len();
+    let mut respelled = secrets.clone();
+    respelled[0] = doubled(&secrets[0]);
+    kept.grant(&x.join("a"), &respelled).unwrap();
+    assert_eq!(kept.checked.len(), 1);
+    assert_eq!(kept.checked[0].against.len(), against);
+    let before = path_fallbacks();
+    kept.grant(&x.join("a"), &secrets).unwrap();
+    assert_eq!(path_fallbacks() - before, 0);
+}
+
+/// A secret one grant names with a doubled slash and another names plainly is judged at
+/// install for both: made a link to the second grant's root after the build, the install
+/// refuses. A build whose lists all have the same bytes rechecks with no [`Path`] compare.
+#[cfg(unix)]
+#[test]
+fn a_secret_respelled_in_a_second_grant_is_still_judged_at_install() {
+    let (folder, home, secrets, x) = two_roots_under_one_folder();
+    let plain = granted_build(&home, &secrets, &x.join("a"));
+    let before = path_fallbacks();
+    assert!(plain.recheck().is_ok());
+    assert_eq!(path_fallbacks() - before, 0);
+    let secret = canonical(folder.path()).unwrap().join("s");
+    std::fs::create_dir_all(&secret).unwrap();
+    let mut first = secrets.clone();
+    first.push(secret.clone());
+    let mut second = secrets.clone();
+    second.push(doubled(&secret));
+    let mut kept = granted_build(&home, &first, &x.join("a"));
+    kept.grant(&x.join("b"), &second).unwrap();
+    assert!(kept.recheck().is_ok());
+    std::fs::remove_dir(&secret).unwrap();
+    std::os::unix::fs::symlink(x.join("b"), &secret).unwrap();
+    match kept.recheck() {
+        Err(SandboxError::Invalid(reason)) => assert_eq!(reason, SECRET_ROOT_REFUSED),
+        other => panic!("{other:?}"),
+    }
+}
