@@ -411,11 +411,16 @@ fn exempt(path: &Path) -> bool {
         || path == Path::new("crates/crazyagent/src/storage/migrations/tests/pins/budget.rs")
 }
 
-/// Whether a path names test-only source: a `tests` folder, a `*tests.rs` file or a
-/// `perf_tests` file or folder. Input: the path from the repo root. Output: the answer.
+/// Whether a path names test-only source: a `tests` folder, a `tests.rs` or `*_tests.rs`
+/// file, or a `perf_tests` folder or `perf_tests.rs` file, each matched as a whole name.
+/// Input: the path from the repo root. Output: the answer.
 fn test_only(path: &Path) -> bool {
     let named = |part: &str| {
-        part == "tests" || part.ends_with("tests.rs") || part.starts_with("perf_tests")
+        part == "tests"
+            || part == "tests.rs"
+            || part.ends_with("_tests.rs")
+            || part == "perf_tests"
+            || part == "perf_tests.rs"
     };
     path.iter().any(|part| part.to_str().is_some_and(named))
 }
@@ -445,6 +450,10 @@ fn a_storage_perf_row_is_exempt_and_product_code_is_not() {
         "crates/kernel/storage/src/namespace.rs",
         "crates/crazyagent/src/storage/migrations.rs",
         "crates/kernel/bus_gateway/src/lib.rs",
+        "crates/x/src/contests.rs",
+        "crates/x/src/latests.rs",
+        "crates/x/src/perf_testsx.rs",
+        "crates/x/src/perf_testsx/a.rs",
     ] {
         assert!(!test_only(Path::new(path)), "{path}");
     }
