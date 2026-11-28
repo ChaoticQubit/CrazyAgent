@@ -1045,6 +1045,34 @@ mod owner_git_rows {
         assert!(!places(&folder, &made.project).profile.exists());
     }
 
+    /// Owner git for a project folder that holds the engine folder is refused before any
+    /// profile as a root that holds the engine's secrets: the project is not in the engine
+    /// folder, so the secret walk, not the engine-folder line, refuses it.
+    #[test]
+    fn owner_git_refuses_a_project_that_holds_the_engine_folder_before_any_profile() {
+        let made = made();
+        let engine = made.project.join("engine-inside");
+        fs::create_dir(&engine).unwrap();
+        fs::write(engine.join("engine.db"), "engine secret").unwrap();
+        let helper = std::env::current_exe().unwrap();
+        match OwnerGit::install(
+            &crate::test_hooks::STAND_IN,
+            &engine,
+            &made.folder,
+            &made.project,
+            &made.git,
+            &helper,
+            &made.grants,
+        ) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, crate::paths::SECRET_ROOT_REFUSED)
+            }
+            other => panic!("expected the secret root refusal, got {other:?}"),
+        }
+        let folder = canonical(&made.folder).unwrap();
+        assert!(!places(&folder, &made.project).profile.exists());
+    }
+
     /// Lays out a stand-in Git for Windows under `root`: each relative file is written empty
     /// and each relative folder made. Inputs: the root, the files and the folders. Output:
     /// the root's `cmd\git.exe` or, with no such file, the first file.
