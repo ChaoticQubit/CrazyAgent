@@ -17,6 +17,8 @@ pub(crate) mod hooks {
         static ARMS: Cell<usize> = const { Cell::new(0) };
         static REAPS: Cell<usize> = const { Cell::new(0) };
         static HEARD: Cell<Option<super::super::HeardAnswer>> = const { Cell::new(None) };
+        static WATCH_ERROR: Cell<Option<u32>> = const { Cell::new(None) };
+        static WATCH_FORCED: Cell<bool> = const { Cell::new(false) };
         #[cfg(unix)]
         static HOLD: Cell<bool> = const { Cell::new(false) };
         #[cfg(unix)]
@@ -40,6 +42,29 @@ pub(crate) mod hooks {
     pub(crate) fn reaped(heard: Option<super::super::HeardAnswer>) {
         REAPS.with(|reaps| reaps.set(reaps.get() + 1));
         HEARD.with(|last| last.set(heard));
+    }
+
+    /// Makes this thread's next watches fail before they arm, so a caller's error arm runs.
+    /// Input: whether to fail them. Output: none.
+    pub(crate) fn force_watch_error(on: bool) {
+        WATCH_FORCED.with(|forced| forced.set(on));
+        WATCH_ERROR.with(|failed| failed.set(None));
+    }
+
+    /// Whether this thread's watches are set to fail; keeps the process number of the child
+    /// the failing watch was given. Input: that child's number. Output: whether to fail.
+    pub(crate) fn watch_fails(pid: u32) -> bool {
+        let forced = WATCH_FORCED.with(Cell::get);
+        if forced {
+            WATCH_ERROR.with(|failed| failed.set(Some(pid)));
+        }
+        forced
+    }
+
+    /// The process number of the child the last forced watch failure was given. Output: it,
+    /// if a watch failed.
+    pub(crate) fn failed_watch_child() -> Option<u32> {
+        WATCH_ERROR.with(Cell::get)
     }
 
     /// How many reaps this thread made through a watch, and what the last one's waiter

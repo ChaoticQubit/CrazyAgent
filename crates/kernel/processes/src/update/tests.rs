@@ -536,6 +536,119 @@ fn executables_inside_an_installed_app_are_not_replaced() -> TestResult {
     Ok(())
 }
 
+/// An update command that exits is heard through one watch armed on the calling thread, not
+/// found by a poll, and its output is kept.
+#[test]
+fn an_update_command_that_exits_is_heard_through_one_watch() {
+    let before = crate::exit_wait::tests::hooks::arms();
+    #[cfg(unix)]
+    let mut command = std::process::Command::new("/bin/echo");
+    #[cfg(windows)]
+    let mut command = std::process::Command::new(windows_tool("cmd.exe"));
+    #[cfg(windows)]
+    command.args(["/C", "echo"]);
+    command.arg("x");
+    let output = run_bounded(
+        &mut command,
+        Duration::from_secs(30),
+        "update_service_failed",
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "x");
+    assert_eq!(crate::exit_wait::tests::hooks::arms() - before, 1);
+}
+
+/// An update command past its limit is killed, then reaped once through its watch after its
+/// waiter answers that it exited, even with that waiter held back until the reap releases
+/// it. Linux takes the waiter thread too, with process descriptors refused.
+#[cfg(unix)]
+#[test]
+fn an_update_command_past_its_limit_is_received_then_reaped_once() {
+    use crate::exit_wait::{Heard, tests::hooks};
+    #[cfg(target_os = "linux")]
+    hooks::refuse_pidfd(Some(rustix::io::Errno::NOSYS));
+    hooks::hold(true);
+    let (before, _) = hooks::reaps();
+    let result = run_bounded(
+        std::process::Command::new("/bin/sleep").arg("5"),
+        Duration::from_millis(200),
+        "update_service_failed",
+    );
+    hooks::hold(false);
+    #[cfg(target_os = "linux")]
+    hooks::refuse_pidfd(None);
+    let (code, message) = said(result.unwrap_err());
+    assert_eq!(code, "update_service_failed");
+    assert!(message.contains("did not finish within"), "{message}");
+    let (after, heard) = hooks::reaps();
+    assert_eq!(after - before, 1);
+    assert_eq!(heard, Some(Heard::Exited));
+}
+
+/// An update command whose watch fails returns that failure at once, with the command killed
+/// and reaped, not left to run out its 5 s: its process number is gone when the call returns.
+#[cfg(unix)]
+#[test]
+fn an_update_command_whose_watch_fails_is_killed_and_reaped() {
+    use crate::exit_wait::tests::hooks;
+    hooks::force_watch_error(true);
+    let started = Instant::now();
+    let result = run_bounded(
+        std::process::Command::new("/bin/sleep").arg("5"),
+        Duration::from_secs(30),
+        "update_service_failed",
+    );
+    let pid = hooks::failed_watch_child();
+    hooks::force_watch_error(false);
+    let (code, message) = said(result.unwrap_err());
+    assert_eq!(code, "update_service_failed");
+    assert!(
+        message.contains("a test forced the watch to fail"),
+        "{message}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    let pid = pid.expect("the watch was forced to fail");
+    let alive = std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        !alive.success(),
+        "the command {pid} outlived its failed watch"
+    );
+}
+
+/// On Windows, an update command past its limit is ended at the limit and reaped once
+/// through its watch, not waited on until its own exit 5 s later.
+#[cfg(windows)]
+#[test]
+fn an_update_command_past_its_limit_is_ended_and_reaped_once_on_windows() {
+    use crate::exit_wait::tests::hooks;
+    let (before, _) = hooks::reaps();
+    let started = Instant::now();
+    let result = run_bounded(
+        std::process::Command::new(windows_tool("PING.EXE")).args(["-n", "6", "127.0.0.1"]),
+        Duration::from_millis(200),
+        "update_service_failed",
+    );
+    assert_eq!(code(result), "update_service_failed");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(hooks::reaps().0 - before, 1);
+}
+
+/// A tool under the Windows system folder. Input: its file name. Output: its path.
+#[cfg(windows)]
+fn windows_tool(name: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").expect("the SystemRoot variable is set");
+    std::path::PathBuf::from(root).join("System32").join(name)
+}
+
 #[cfg(unix)]
 #[test]
 fn a_helper_that_leaves_a_process_holding_its_output_still_returns() {

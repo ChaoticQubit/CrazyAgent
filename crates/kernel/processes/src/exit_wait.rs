@@ -69,6 +69,10 @@ pub enum Woke {
 /// process number another process may since have taken. Input: the child, not yet waited
 /// on by this caller. Output: the watch, or the error reading or arming it.
 pub fn watch(child: &mut Child) -> io::Result<ExitWatch> {
+    #[cfg(test)]
+    if tests::hooks::watch_fails(child.id()) {
+        return Err(io::Error::other("a test forced the watch to fail"));
+    }
     if child.try_wait()?.is_some() {
         return Ok(ExitWatch { arm: Arm::Reaped });
     }
