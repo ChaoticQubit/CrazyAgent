@@ -486,12 +486,12 @@ pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError
 
 /// Removes the older backup folders: the pinned one stays outside the count, the one just
 /// made stays, and of the others the newest BACKUPS_KEPT - 1 do, or BACKUPS_KEPT when the
-/// one just made is the pinned one, so it is not counted twice. Only real folders of this
-/// user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count; anything else, another
-/// account's folder included, is neither counted nor removed. Inputs: the backups folder,
-/// the new backup and the time now. Output: Ok once the older backups are gone.
-fn prune(folder: &Path, made: &Path, now: SystemTime) -> Result<(), StorageError> {
-    let found = backups_in(folder)?;
+/// one just made is the pinned one, so it is not counted twice. Besides the one just made,
+/// only real folders of this user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count;
+/// anything else, another account's folder included, is neither counted nor removed. Inputs:
+/// the backups folder, the new backup and the time now. Output: Ok once the older are gone.
+pub(crate) fn prune(folder: &Path, made: &Path, now: SystemTime) -> Result<(), StorageError> {
+    let found = backups_listed(folder, Some(made))?;
     let pinned = pinned(folder, &found, now);
     let made_pinned = pinned.is_some_and(|index| folder.join(&found[index].1) == made);
     let rotating: Vec<&str> = found
@@ -523,6 +523,17 @@ pub fn prune_for_test(folder: &Path, made: &Path, now: SystemTime) -> Result<(),
 /// each folder's UTC time and name; links, files, other names and folders another account
 /// placed there ([`own_folder`]) are left out.
 pub fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, StorageError> {
+    backups_listed(folder, None)
+}
+
+/// [`backups_in`] for a prune right after its backup: the folder at exactly the `made` path
+/// is listed without an owner check, since this call just created it private and the prune
+/// never removes it; every other entry is checked as in [`backups_in`]. Inputs: the backups
+/// folder and the path of the backup just made, or None. Output: as [`backups_in`].
+fn backups_listed(
+    folder: &Path,
+    made: Option<&Path>,
+) -> Result<Vec<(String, String)>, StorageError> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(folder).map_err(backup_failed)? {
         let entry = entry.map_err(backup_failed)?;
@@ -533,6 +544,10 @@ pub fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, StorageError> 
             continue;
         };
         let path = folder.join(&name);
+        if made == Some(path.as_path()) {
+            found.push((time, name));
+            continue;
+        }
         #[cfg(test)]
         OWNER_CHECKS.with(|checks| checks.borrow_mut().push(path.clone()));
         if own_folder(&path) {
