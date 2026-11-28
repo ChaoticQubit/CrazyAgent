@@ -2,6 +2,7 @@ use super::flow::{self, ENGINE, hold, pending_ref, verify_objects};
 use super::git::{Repo, failure, object_id};
 use super::owner;
 use super::store::{self, Intent, Record};
+use super::went_back::{Refusal, Why};
 use super::{AfterRegeneration, AgentKind, ChangeSetId, ChangeState, diff};
 use crate::engine::EngineError;
 use kernel_sandbox::profile::ProjectSandbox;
@@ -128,14 +129,17 @@ pub(super) fn major_of(printed: &[u8]) -> Option<u32> {
 }
 
 /// How one regeneration ended: its commit is the set's head and the agent's worktree moved
-/// there, it rewrote nothing and the clash goes to the agent, or the set or main moved
-/// meanwhile and the clash is checked again.
+/// there, it rewrote nothing for a reason and the tool named in the owner's note and the
+/// clash goes to the agent, or the set or main moved meanwhile and the clash is checked again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Regenerated {
     Applied,
-    Refused,
+    Refused(Why, &'static str),
     Stale,
 }
+
+/// What the owner's note names when no single tool ran.
+const PACKAGE_TOOLS: &str = "the package tools";
 
 /// Marks one set's regeneration as running until it is dropped, also when it panics.
 pub(super) struct Running(String);
@@ -244,8 +248,16 @@ pub(super) fn regenerate_later(
             drop(guard);
             match ended {
                 Ok((_, Regenerated::Applied)) => {}
-                Ok((db, Regenerated::Refused)) => after(&db, &id, false, settings.as_ref()),
-                Ok((db, Regenerated::Stale)) => after(&db, &id, true, settings.as_ref()),
+                Ok((db, Regenerated::Refused(why, tool))) => {
+                    eprintln!("landing_regenerate_refused kind={}", why.word());
+                    let refusal = Refusal {
+                        why,
+                        tool,
+                        files: paths,
+                    };
+                    after(&db, &id, Some(&refusal), settings.as_ref());
+                }
+                Ok((db, Regenerated::Stale)) => after(&db, &id, None, settings.as_ref()),
                 Err(error) => eprintln!(
                     "landing_regenerate_failed code={}",
                     crate::protocol::plain_code(&error.0)
@@ -253,6 +265,12 @@ pub(super) fn regenerate_later(
             }
         });
     Ok(spawned.is_ok())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Why the last [`regenerate`] on this thread rewrote nothing, if it refused.
+    pub(super) static REFUSED: std::cell::Cell<Option<Why>> = const { std::cell::Cell::new(None) };
 }
 
 /// Rewrites the clashing lockfiles of a held set at once, as a regeneration does, for the
@@ -268,6 +286,10 @@ pub(super) fn regenerate(
 ) -> Result<Option<String>, EngineError> {
     let how = regenerated(db, &record.id, paths, settings)?;
     *record = store::load(db, &record.id)?;
+    REFUSED.set(match how {
+        Regenerated::Refused(why, _) => Some(why),
+        Regenerated::Applied | Regenerated::Stale => None,
+    });
     Ok((how == Regenerated::Applied).then(|| record.head.clone()))
 }
 
@@ -301,11 +323,11 @@ fn regenerated(
         "a regeneration names known lockfiles only"
     );
     if !cfg!(target_os = "macos") {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Other, PACKAGE_TOOLS));
     }
     let repository = store::load(db, id)?.repository;
     let Some(runtime) = runtime_of(db) else {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
     };
     let git_dir = repository.join(".git");
     let owner = Repo::open(&repository, &git_dir, None)?;
@@ -320,20 +342,20 @@ fn regenerated(
             return Ok(Regenerated::Stale);
         }
         if super::subagent::lead_of(db, &record.project, &record.agent, &repository)?.is_some() {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::Other, PACKAGE_TOOLS));
         }
         let Some((_, tip)) = owner::land_on(db, &owner, &record.project)? else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
         };
         verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
         let from = owner::measured_from(db, &owner, &record, &tip)?;
         let touched = owner::merge_paths(&owner, &from, &tip, &record.head)?;
         if owner::uses_configured_commands(&owner, &touched, &[&from, &tip, &record.head])? {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::MergeSettings, PACKAGE_TOOLS));
         }
         let (tree, conflicts) = owner::merge(&owner, &from, &tip, &record.head)?;
         if conflicts.is_empty() || conflicts.iter().any(|path| !paths.contains(path)) {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, PACKAGE_TOOLS));
         }
         (record, tip, tree)
     };
@@ -342,7 +364,7 @@ fn regenerated(
     index.capture(&["read-tree", &tree], 256)?;
     for path in paths {
         let Some((mode, blob)) = tip_blob(&owner, &tip, path)? else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, PACKAGE_TOOLS));
         };
         index.capture(&["update-index", "--cacheinfo", &mode, &blob, path], 256)?;
     }
@@ -354,7 +376,7 @@ fn regenerated(
         ENGINE,
     )?;
     let Some(worktree) = scratch.add_worktree(&merged)? else {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
     };
     let uv_clash = paths.iter().any(|path| program_for(path) == Some("uv"));
     let (sandbox, listed) = match confined(
@@ -363,7 +385,7 @@ fn regenerated(
         Ok(confined) => confined,
         Err(code) => {
             eprintln!("landing_regenerate_unconfined code={code}");
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::Setup, PACKAGE_TOOLS));
         }
     };
     let profile = scratch.folder.join("profile.sb");
@@ -386,7 +408,7 @@ fn regenerated(
             None => worktree.clone(),
         };
         if !plain_folder(&worktree, &folder) {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, PACKAGE_TOOLS));
         }
         let major = *majors.entry(program).or_insert_with(|| {
             run(
@@ -403,7 +425,8 @@ fn regenerated(
             .and_then(|(_, printed)| major_of(&printed))
         });
         let Some(command) = tool_for(path, major) else {
-            return Ok(Regenerated::Refused);
+            let why = if stop() { Why::Hidden } else { Why::Tool };
+            return Ok(Regenerated::Refused(why, program));
         };
         let ran = run(
             &sandbox,
@@ -416,26 +439,32 @@ fn regenerated(
             &stop,
         );
         if ran.map(|(code, _)| code) != Some(0) {
-            return Ok(Regenerated::Refused);
+            let why = if stop() { Why::Hidden } else { Why::Tool };
+            return Ok(Regenerated::Refused(why, program));
         }
     }
+    let named = match majors.len() {
+        1 => paths.iter().find_map(|path| program_for(path)),
+        _ => None,
+    }
+    .unwrap_or(PACKAGE_TOOLS);
     if crate::sandbox::access_store::hidden::hide_stops(
         db,
         record.project.as_str(),
         Some(&listed),
         &|| false,
     )() {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Hidden, named));
     }
     if changed_outside(&repository, &scratch, &worktree, &merged, paths)? {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::WroteOutside, named));
     }
     for path in paths {
         let Some(bytes) = read_plain(&worktree, path) else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::WroteOutside, named));
         };
         let Some((mode, _)) = tip_blob(&owner, &tip, path)? else {
-            return Ok(Regenerated::Refused);
+            return Ok(Regenerated::Refused(Why::NotLockfileOnly, named));
         };
         let output = owner.exec(&["hash-object", "-w", "--stdin"], Some(&bytes), &[], 256)?;
         if output.code != 0 || output.overflow {
@@ -462,7 +491,7 @@ fn regenerated(
     }
     let agent = flow::agent(db, &now)?;
     if agent.head()? != now.head || !flow::holds_only(&agent.repo, &now.head)? {
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Moved, named));
     }
     let before = now.clone();
     now.waiting = false;
@@ -489,7 +518,7 @@ fn regenerated(
             &pending_ref(&before.id),
             Some(&before.head),
         )?;
-        return Ok(Regenerated::Refused);
+        return Ok(Regenerated::Refused(Why::Moved, named));
     }
     now.intent = None;
     store::save(db, &now)?;
