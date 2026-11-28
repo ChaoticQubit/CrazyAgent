@@ -141,22 +141,32 @@ pub fn run_bounded(
             return Err(failed);
         }
     };
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
-            outcome => {
-                #[cfg(unix)]
-                stop(pid);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(InstallError(if outcome.is_ok() {
-                    "setup_timeout"
-                } else {
-                    "setup_install_failed"
-                }));
+    let watched = crate::exit_wait::watch(&mut child);
+    let (outcome, watch) = match watched {
+        Ok(mut watch) => (watch.exited_by(&child, deadline), Some(watch)),
+        Err(error) => (Err(error), None),
+    };
+    let status = match (outcome, watch) {
+        (Ok(true), Some(watch)) => watch.reap(&mut child),
+        (outcome, watch) => {
+            #[cfg(unix)]
+            stop(pid);
+            let _ = child.kill();
+            match watch {
+                Some(watch) => drop(watch.reap(&mut child)),
+                None => drop(child.wait()),
             }
+            return Err(InstallError(if outcome.is_ok() {
+                "setup_timeout"
+            } else {
+                "setup_install_failed"
+            }));
         }
+    };
+    let Ok(status) = status else {
+        #[cfg(unix)]
+        stop(pid);
+        return Err(InstallError("setup_install_failed"));
     };
     if !status.success() {
         #[cfg(unix)]
