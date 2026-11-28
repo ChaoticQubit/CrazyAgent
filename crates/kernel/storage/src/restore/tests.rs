@@ -845,6 +845,21 @@ fn record_writes_on_a_thread_that_records_nothing_keep_no_write() {
 }
 
 #[test]
+fn a_recording_thread_keeps_each_record_write_and_a_full_list_panics() {
+    record::record_writes();
+    for index in 0..record::WRITES_MAX {
+        record::note_write(index % 2 == 0);
+    }
+    assert_eq!(record::take_writes().len(), record::WRITES_MAX);
+    for _ in 0..record::WRITES_MAX {
+        record::note_write(true);
+    }
+    let full = std::panic::catch_unwind(|| record::note_write(true));
+    assert!(full.is_err());
+    assert_eq!(record::take_writes().len(), record::WRITES_MAX);
+}
+
+#[test]
 fn a_good_newest_slot_is_the_only_slot_a_read_checks() {
     let cases = [
         (

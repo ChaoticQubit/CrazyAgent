@@ -55,9 +55,14 @@ pub(super) type Place = fn(&File, u64, &[u8]) -> std::io::Result<()>;
 
 #[cfg(test)]
 std::thread_local! {
-    /// Whether each record write on this thread ended on its own full flush, in order.
-    static WRITES: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Whether each record write on this thread ended on its own full flush, in order, while
+    /// the thread records; None on a thread that does not.
+    static WRITES: std::cell::RefCell<Option<Vec<bool>>> = const { std::cell::RefCell::new(None) };
 }
+
+/// The most record writes one recording holds before a write panics.
+#[cfg(test)]
+pub(super) const WRITES_MAX: usize = 1024;
 
 #[cfg(test)]
 std::thread_local! {
@@ -88,11 +93,37 @@ pub(super) fn take_checks() -> usize {
     CHECKS.with(|checks| checks.replace(0))
 }
 
-/// Takes the list of this thread's record writes, each true when it ended on its own full
-/// flush, and starts a new one. Output: the list.
+/// Starts recording this thread's record writes, with an empty list. A thread that never
+/// calls it records nothing. Input: none. Output: none.
+#[cfg(test)]
+pub(super) fn record_writes() {
+    WRITES.with(|writes| *writes.borrow_mut() = Some(Vec::new()));
+}
+
+/// Takes the list of this thread's record writes since the last record or take, each true
+/// when it ended on its own full flush, recording on. Output: the list; empty on a thread
+/// that is not recording.
 #[cfg(test)]
 pub(super) fn take_writes() -> Vec<bool> {
-    WRITES.with(|writes| writes.take())
+    WRITES.with(|writes| {
+        writes
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    })
+}
+
+/// Notes one record write when this thread records; a list past [`WRITES_MAX`] panics.
+/// Input: whether the write ended on its own full flush. Output: none.
+#[cfg(test)]
+pub(super) fn note_write(written: bool) {
+    WRITES.with(|writes| {
+        if let Some(writes) = writes.borrow_mut().as_mut() {
+            assert!(writes.len() < WRITES_MAX, "record writes list is full");
+            writes.push(written);
+        }
+    });
 }
 
 /// The record file as found: missing, in the old one-file format, or as its two slots.
@@ -373,7 +404,7 @@ pub(super) fn write(
     };
     assert!(written || !flushed);
     #[cfg(test)]
-    WRITES.with(|writes| writes.borrow_mut().push(written));
+    note_write(written);
     Ok(())
 }
 

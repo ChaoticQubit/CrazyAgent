@@ -721,7 +721,7 @@ fn put_back_keeps_the_writes_still_in_the_wal_in_its_copy_of_engine_db() {
 fn a_restore_a_finish_and_a_put_back_each_end_on_a_fully_flushed_record_write() {
     let (root, path) = upgraded(true);
     write_restore_record(root.path(), crate::restore::RECORD_PENDING).unwrap();
-    crate::restore::record::take_writes();
+    crate::restore::record::record_writes();
     restore_pinned(&path, &quiet_hooks()).unwrap();
     let pinned = crate::restore::record::take_writes();
     finish(&path, &|_, _, _| {}).unwrap();
